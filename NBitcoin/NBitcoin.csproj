@@ -5,7 +5,7 @@
 		<Copyright>Copyright © Metaco SA 2017</Copyright>
 		<Description>The C# Bitcoin Library</Description>
 		<PackageIconUrl>https://aois.blob.core.windows.net/public/Bitcoin.png</PackageIconUrl>
-		<PackageId>Particl.NBitcoin.Altcoins</PackageId>
+		<PackageId>Particl.NBitcoin</PackageId>
 		<PackageTags>bitcoin</PackageTags>
 		<PackageProjectUrl>https://github.com/MetacoSA/NBitcoin</PackageProjectUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
