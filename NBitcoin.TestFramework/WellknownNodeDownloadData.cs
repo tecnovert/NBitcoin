@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace NBitcoin.Tests
 {
@@ -1065,6 +1065,36 @@ namespace NBitcoin.Tests
 			};
 		}
 
+		public class ParticlNodeDownloadData
+		{
+			public NodeDownloadData v0_18_1_5 = new NodeDownloadData()
+			{
+				Version = "0.18.1.5",
+				Windows = new NodeOSDownloadData()
+				{
+					DownloadLink = "https://github.com/particl/particl-core/releases/download/v{0}/particl-{0}-win64.zip",
+					Archive = "particl-{0}-win64.zip",
+					Executable = "particl-{0}/bin/particld.exe",
+					Hash = "06b285be321328729fe5082dc12a3ca5a599fadfacd1487b1f0aa853840ccfd3"
+				},
+				Linux = new NodeOSDownloadData()
+				{
+					DownloadLink = "https://github.com/particl/particl-core/releases/download/v{0}/particl-{0}-x86_64-linux-gnu.tar.gz",
+					Archive = "particl-{0}-x86_64-linux-gnu.tar.gz",
+					Executable = "particl-{0}/bin/particld",
+					Hash = "04b2b9f42d328a5ea3fa83c67982adfc4826085752bc276d1faed32fdfaf6b79"
+				},
+				Mac = new NodeOSDownloadData()
+				{
+					DownloadLink = "https://github.com/particl/particl-core/releases/download/v{0}/particl-{0}-osx64.tar.gz",
+					Archive = "particl-{0}-osx64.tar.gz",
+					Executable = "particl-{0}/bin/particld",
+					Hash = "2763eb006aea64bff3c15815520f83573190e92c3c4ccdab8bbf91b15c13ae39"
+				},
+				UseSectionInConfigFile = true,
+			};
+		}
+
 		public static GoByteNodeDownloadData GoByte
 		{
 			get; set;
@@ -1193,6 +1223,11 @@ namespace NBitcoin.Tests
 		{
 			get; set;
 		} = new ZCoinNodeDownloadData();
+
+		public static ParticlNodeDownloadData Particl
+		{
+			get; set;
+		} = new ParticlNodeDownloadData();
 
 		public bool UseSectionInConfigFile { get; private set; }
 		public string AdditionalRegtestConfig { get; private set; }

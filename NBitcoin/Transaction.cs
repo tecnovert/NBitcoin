@@ -1,4 +1,4 @@
-﻿using NBitcoin.Crypto;
+using NBitcoin.Crypto;
 using NBitcoin.DataEncoders;
 using NBitcoin.Protocol;
 using NBitcoin.RPC;
@@ -622,7 +622,7 @@ namespace NBitcoin
 		}
 
 		internal readonly static Money NullMoney = new Money(-1L);
-		Money _Value = NullMoney;
+		protected Money _Value = NullMoney;
 		public virtual Money Value
 		{
 			get
