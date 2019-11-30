@@ -2,24 +2,27 @@
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 
 namespace NBitcoin.JsonConverters
 {
-	public class LockTimeJsonConverter : JsonConverter
+#if !NOJSONNET
+	public
+#else
+	internal
+#endif
+	class SequenceJsonConverter : JsonConverter
 	{
 		public override bool CanConvert(Type objectType)
 		{
-			return objectType == typeof(LockTime) || objectType == typeof(LockTime?);
+			return objectType == typeof(Sequence) || objectType == typeof(Sequence?);
 		}
 
 		public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
 		{
 			try
 			{
-				var nullable = objectType == typeof(LockTime?);
+				var nullable = objectType == typeof(Sequence?);
 				if (reader.TokenType == JsonToken.Null)
 				{
 					if (nullable)
@@ -27,11 +30,11 @@ namespace NBitcoin.JsonConverters
 					return LockTime.Zero;
 				}
 				reader.AssertJsonType(JsonToken.Integer);
-				return new LockTime((uint)(long)reader.Value);
+				return new Sequence((uint)(long)reader.Value);
 			}
 			catch
 			{
-				throw new JsonObjectException("Invalid locktime", reader);
+				throw new JsonObjectException("Invalid sequence", reader);
 			}
 		}
 
@@ -39,7 +42,7 @@ namespace NBitcoin.JsonConverters
 		{
 			if (value != null)
 			{
-				writer.WriteValue(((LockTime)value).Value);
+				writer.WriteValue(((Sequence)value).Value);
 			}
 		}
 	}

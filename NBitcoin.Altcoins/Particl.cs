@@ -349,9 +349,9 @@ namespace NBitcoin.Altcoins
 
         public class ParticlMainnetAddressStringParser : NetworkStringParser
         {
-            public override bool TryParse<T>(string str, Network network, out T result)
+            public override bool TryParse(string str, Network network, Type targetType, out IBitcoinString result)
             {
-                if (str.StartsWith("XPAR", StringComparison.OrdinalIgnoreCase) && typeof(T) == typeof(BitcoinExtKey))
+                if (str.StartsWith("XPAR", StringComparison.OrdinalIgnoreCase) && targetType == typeof(BitcoinExtKey))
                 {
                     try
                     {
@@ -360,14 +360,14 @@ namespace NBitcoin.Altcoins
                         decoded[1] = 0x1d;
                         decoded[2] = 0xae;
                         decoded[3] = 0xb8;
-                        result = (T)(object)new BitcoinExtKey(Encoders.Base58Check.EncodeData(decoded), network);
+                        result = new BitcoinExtKey(Encoders.Base58Check.EncodeData(decoded), network);
                         return true;
                     }
                     catch
                     {
                     }
                 }
-                if (str.StartsWith("PPAR", StringComparison.OrdinalIgnoreCase) && typeof(T) == typeof(BitcoinExtPubKey))
+                if (str.StartsWith("PPAR", StringComparison.OrdinalIgnoreCase) && targetType == typeof(BitcoinExtPubKey))
                 {
                     try
                     {
@@ -376,14 +376,14 @@ namespace NBitcoin.Altcoins
                         decoded[1] = 0x6e;
                         decoded[2] = 0x82;
                         decoded[3] = 0xd1;
-                        result = (T)(object)new BitcoinExtPubKey(Encoders.Base58Check.EncodeData(decoded), network);
+                        result = new BitcoinExtPubKey(Encoders.Base58Check.EncodeData(decoded), network);
                         return true;
                     }
                     catch
                     {
                     }
                 }
-                return base.TryParse(str, network, out result);
+                return base.TryParse(str, network, targetType, out result);
             }
         }
 

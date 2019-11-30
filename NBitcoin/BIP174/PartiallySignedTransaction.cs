@@ -152,21 +152,7 @@ namespace NBitcoin
 				return false;
 			}
 		}
-		[Obsolete("Use Load(byte[] rawBytes, Network network)")]
-		public static PSBT Parse(string hexOrBase64, ConsensusFactory consensusFactory)
-		{
-			if (hexOrBase64 == null)
-				throw new ArgumentNullException(nameof(hexOrBase64));
-			if (consensusFactory == null)
-				throw new ArgumentNullException(nameof(consensusFactory));
-			byte[] raw;
-			if (HexEncoder.IsWellFormed(hexOrBase64))
-				raw = Encoders.Hex.DecodeData(hexOrBase64);
-			else
-				raw = Encoders.Base64.DecodeData(hexOrBase64);
 
-			return Load(raw, consensusFactory);
-		}
 		public static PSBT Load(byte[] rawBytes, Network network)
 		{
 			if (network == null)
@@ -176,16 +162,6 @@ namespace NBitcoin
 			var ret = new PSBT(stream, network);
 			return ret;
 		}
-		[Obsolete("Use Load(byte[] rawBytes, Network network)")]
-		public static PSBT Load(byte[] rawBytes, ConsensusFactory consensusFactory)
-		{
-			if (rawBytes == null)
-				throw new ArgumentNullException(nameof(rawBytes));
-			var stream = new BitcoinStream(rawBytes);
-			stream.ConsensusFactory = consensusFactory;
-			var ret = new PSBT(stream, null);
-			return ret;
-		}
 
 		public Network Network { get; }
 
@@ -193,6 +169,8 @@ namespace NBitcoin
 		{
 			if (transaction == null)
 				throw new ArgumentNullException(nameof(transaction));
+			if (network == null)
+				throw new ArgumentNullException(nameof(network));
 			Network = network;
 			tx = transaction.Clone();
 			Inputs = new PSBTInputList();
@@ -210,6 +188,8 @@ namespace NBitcoin
 
 		internal PSBT(BitcoinStream stream, Network network)
 		{
+			if (network == null)
+				throw new ArgumentNullException(nameof(network));
 			Network = network;
 			Inputs = new PSBTInputList();
 			Outputs = new PSBTOutputList();
@@ -294,6 +274,8 @@ namespace NBitcoin
 		{
 			if (coins == null)
 				return this;
+			if (IsAllFinalized())
+				return this;
 			foreach (var coin in coins)
 			{
 				var indexedInput = this.Inputs.FindIndexedInput(coin.Outpoint);
@@ -336,6 +318,8 @@ namespace NBitcoin
 				txsById.TryAdd(tx.GetHash(), tx);
 			foreach (var input in Inputs)
 			{
+				if (input.IsFinalized())
+					continue;
 				if (input.WitnessUtxo == null && txsById.TryGetValue(input.TxIn.PrevOut.Hash, out var tx))
 				{
 					if (input.TxIn.PrevOut.N >= tx.Outputs.Count)
@@ -627,9 +611,7 @@ namespace NBitcoin
 
 		internal TransactionBuilder CreateTransactionBuilder()
 		{
-#pragma warning disable CS0618 // Type or member is obsolete
-			var transactionBuilder = this.Network == null ? tx.GetConsensusFactory().CreateTransactionBuilder() : Network.CreateTransactionBuilder();
-#pragma warning restore CS0618 // Type or member is obsolete
+			var transactionBuilder = Network.CreateTransactionBuilder();
 			if (Settings.CustomBuilderExtensions != null)
 			{
 				transactionBuilder.Extensions.Clear();
@@ -838,10 +820,7 @@ namespace NBitcoin
 		public PSBT Clone(bool keepOriginalTransactionInformation)
 		{
 			var bytes = ToBytes();
-#pragma warning disable CS0618 // Type or member is obsolete
-			var psbt = Network == null ? PSBT.Load(bytes, tx.GetConsensusFactory())
-									   : PSBT.Load(bytes, Network);
-#pragma warning restore CS0618 // Type or member is obsolete
+			var psbt = PSBT.Load(bytes, Network);
 			if (keepOriginalTransactionInformation)
 			{
 				for (int i = 0; i < Inputs.Count; i++)
@@ -883,14 +862,6 @@ namespace NBitcoin
 			return new PSBT(transaction, network);
 		}
 
-		[Obsolete("Use FromTransaction(Transaction transaction, Network network) instead")]
-		public static PSBT FromTransaction(Transaction transaction)
-		{
-			if (transaction == null)
-				throw new ArgumentNullException(nameof(transaction));
-			return new PSBT(transaction, null);
-		}
-
 		public PSBT AddScripts(params Script[] redeems)
 		{
 			if (redeems == null)
@@ -903,6 +874,8 @@ namespace NBitcoin
 				var p2shp2wsh = redeem.WitHash.ScriptPubKey.Hash.ScriptPubKey;
 				foreach (var o in this.Inputs.OfType<PSBTCoin>().Concat(this.Outputs))
 				{
+					if (o is PSBTInput ii && ii.IsFinalized())
+						continue;
 					var txout = o.GetCoin()?.TxOut;
 					if (txout == null)
 						continue;
@@ -1064,7 +1037,7 @@ namespace NBitcoin
 		}
 
 		/// <summary>
-		/// Add keypath information to this PSBT
+		/// Add keypath information to this PSBT, if the PSBT all finalized this operation is a no-op
 		/// </summary>
 		/// <param name="pubkey">The public key which need to sign</param>
 		/// <param name="rootedKeyPath">The keypath to this public key</param>
@@ -1076,10 +1049,13 @@ namespace NBitcoin
 				throw new ArgumentNullException(nameof(pubkey));
 			if (rootedKeyPath == null)
 				throw new ArgumentNullException(nameof(rootedKeyPath));
-
+			if (IsAllFinalized())
+				return this;
 			var txBuilder = CreateTransactionBuilder();
 			foreach (var o in this.Inputs.OfType<PSBTCoin>().Concat(this.Outputs))
 			{
+				if (o is PSBTInput i && i.IsFinalized())
+					continue;
 				var coin = o.GetCoin();
 				if (coin == null)
 					continue;
@@ -1096,7 +1072,7 @@ namespace NBitcoin
 		/// <summary>
 		/// Rebase the keypaths.
 		/// If a PSBT updater only know the child HD public key but not the root one, another updater knowing the parent master key it is based on
-		/// can rebase the paths.
+		/// can rebase the paths. If the PSBT is all finalized this operation is a no-op
 		/// </summary>
 		/// <param name="accountKey">The current account key</param>
 		/// <param name="newRoot">The KeyPath with the fingerprint of the new root key</param>
@@ -1107,10 +1083,14 @@ namespace NBitcoin
 				throw new ArgumentNullException(nameof(accountKey));
 			if (newRoot == null)
 				throw new ArgumentNullException(nameof(newRoot));
+			if (IsAllFinalized())
+				return this;
 			accountKey = accountKey.AsHDKeyCache();
 			var accountKeyFP = accountKey.GetPublicKey().GetHDFingerPrint();
 			foreach (var o in HDKeysFor(accountKey).GroupBy(c => c.Coin))
 			{
+				if (o.Key is PSBTInput i && i.IsFinalized())
+					continue;
 				foreach (var keyPath in o)
 				{
 					o.Key.HDKeyPaths.Remove(keyPath.PubKey);

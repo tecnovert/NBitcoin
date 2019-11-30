@@ -1,11 +1,14 @@
-FROM mcr.microsoft.com/dotnet/core/sdk:2.1.505-alpine3.7 AS builder
+FROM mcr.microsoft.com/dotnet/core/sdk:3.1-bionic AS builder
 
-RUN apk add libcurl
+RUN apt update && apt install -y libcurl3 libgit2-dev
 
 WORKDIR /source
 COPY . .
 
 VOLUME /out
 
-CMD dotnet build /p:TargetFrameworkOverride=netstandard2.0 -c Release || true \
-    && dotnet pack /p:TargetFrameworkOverride=netstandard2.0 --no-build -c Release -o /out/packages
+CMD dotnet --list-sdks \
+    && dotnet build -c Release /p:TargetFrameworkOverride=netstandard2.0 -f netstandard2.0 NBitcoin || true \
+    && dotnet pack --no-build /p:TargetFrameworkOverride=netstandard2.0 -c Release -o /out/packages NBitcoin \
+    && dotnet build -c Release /p:TargetFrameworkOverride=netstandard2.0 -f netstandard2.0 NBitcoin.Altcoins || true \
+    && dotnet pack --no-build /p:TargetFrameworkOverride=netstandard2.0 -c Release -o /out/packages NBitcoin.Altcoins

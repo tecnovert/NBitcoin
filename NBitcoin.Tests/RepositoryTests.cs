@@ -1,12 +1,10 @@
 ﻿#if !NOFILEIO
-using NBitcoin.BitcoinCore;
 using NBitcoin.Crypto;
 using NBitcoin.DataEncoders;
 using NBitcoin.OpenAsset;
 using NBitcoin.Protocol;
 using NBitcoin.Protocol.Behaviors;
 using NBitcoin.RPC;
-using NBitcoin.SPV;
 using NBitcoin.Stealth;
 using Newtonsoft.Json.Linq;
 using System;
@@ -55,15 +53,6 @@ namespace NBitcoin.Tests
 
 			#endregion
 		}
-
-		[Fact]
-		[Trait("UnitTest", "UnitTest")]
-		//The last block is off by 1 byte + lots of padding zero at the end
-		public void CanEnumerateIncompleteBlk()
-		{
-			Assert.Equal(301, StoredBlock.EnumerateFile(@"data/blocks/incompleteblk.dat").Count());
-		}
-
 		enum CoinType : int
 		{
 			Segwit = 0,
