@@ -255,7 +255,7 @@ namespace NBitcoin.Altcoins
 				{
 					Format = BCashAddr.BchAddr.CashFormat.Cashaddr,
 					Prefix = _Prefix,
-					Hash = keyId.ToBytes(true),
+					Hash = keyId.ToBytes(),
 					Type = BCashAddr.BchAddr.CashType.P2PKH,
 					Network = network
 				};
@@ -268,7 +268,7 @@ namespace NBitcoin.Altcoins
 				{
 					Format = BCashAddr.BchAddr.CashFormat.Cashaddr,
 					Prefix = _Prefix,
-					Hash = scriptId.ToBytes(true),
+					Hash = scriptId.ToBytes(),
 					Type = BCashAddr.BchAddr.CashType.P2SH,
 					Network = network
 				};
@@ -302,7 +302,8 @@ namespace NBitcoin.Altcoins
 				CoinbaseMaturity = 100,
 				MinimumChainWork = new uint256("0000000000000000000000000000000000000000007e5dbf54c7f6b58a6853cd"),
 				ConsensusFactory = BCashConsensusFactory.Instance,
-				SupportSegwit = false
+				SupportSegwit = false,
+				NeverNeedPreviousTxForSigning = true
 			})
 			// See https://support.bitpay.com/hc/en-us/articles/115004671663-BitPay-s-Adopted-Conventions-for-Bitcoin-Cash-Addresses-URIs-and-Payment-Requests
 			// Note: This is not compatible with Bitcoin ABC
@@ -321,6 +322,7 @@ namespace NBitcoin.Altcoins
 			.AddAlias("bch-mainnet")
 			.AddAlias("bcash-mainnet")
 			.AddAlias("bcash-main")
+			.SetUriScheme("bitcoincash")
 			.AddDNSSeeds(new[]
 			{
 				new DNSSeedData("bitcoinabc.org", "seed.bitcoinabc.org"),
@@ -354,7 +356,8 @@ namespace NBitcoin.Altcoins
 				CoinbaseMaturity = 100,
 				MinimumChainWork = new uint256("00000000000000000000000000000000000000000000002888c34d61b53a244a"),
 				ConsensusFactory = BCashConsensusFactory.Instance,
-				SupportSegwit = false
+				SupportSegwit = false,
+				NeverNeedPreviousTxForSigning = true
 			})
 			.SetBase58Bytes(Base58Type.PUBKEY_ADDRESS, new byte[] { 111 })
 			.SetBase58Bytes(Base58Type.SCRIPT_ADDRESS, new byte[] { 196 })
@@ -371,6 +374,7 @@ namespace NBitcoin.Altcoins
 			.AddAlias("bch-testnet")
 			.AddAlias("bcash-test")
 			.AddAlias("bcash-testnet")
+			.SetUriScheme("bitcoincash")
 			.AddDNSSeeds(new[]
 			{
 				new DNSSeedData("bitcoinabc.org", "testnet-seed.bitcoinabc.org"),
@@ -404,7 +408,8 @@ namespace NBitcoin.Altcoins
 				MinerConfirmationWindow = 144,
 				CoinbaseMaturity = 100,
 				ConsensusFactory = BCashConsensusFactory.Instance,
-				SupportSegwit = false
+				SupportSegwit = false,
+				NeverNeedPreviousTxForSigning = true
 			})
 			.SetBase58Bytes(Base58Type.PUBKEY_ADDRESS, new byte[] { 111 })
 			.SetBase58Bytes(Base58Type.SCRIPT_ADDRESS, new byte[] { 196 })
@@ -421,6 +426,7 @@ namespace NBitcoin.Altcoins
 			.AddAlias("bch-regtest")
 			.AddAlias("bcash-reg")
 			.AddAlias("bcash-regtest")
+			.SetUriScheme("bitcoincash")
 			.SetGenesis("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000");
 			return builder;
 		}
@@ -623,8 +629,8 @@ namespace BCashAddr
 			var payloadData = FromByte5Array(data);
 			var versionByte = payloadData[0];
 			var hash = payloadData.Skip(1).ToArray();
-			Validation.Validate(GetHashSize((byte)versionByte) == hash.Length * 8, $"Invalid hash size: {address}");
-			var type = GetType((byte)versionByte);
+			Validation.Validate(GetHashSize(versionByte) == hash.Length * 8, $"Invalid hash size: {address}");
+			var type = GetType(versionByte);
 			return new CashAddrData
 			{
 				Prefix = prefix,
@@ -884,7 +890,6 @@ namespace BCashAddr
 				if(bits > 0)
 				{
 					result[index] = (byte)((accumulator << (to - bits)) & mask);
-					++index;
 				}
 			}
 			else

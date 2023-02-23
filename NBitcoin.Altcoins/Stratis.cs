@@ -56,7 +56,6 @@ namespace NBitcoin.Altcoins
 
 			public override bool TryCreateNew(Type type, out IBitcoinSerializable result)
 			{
-				result = null;
 				if (IsHeadersPayload(type))
 				{
 					result = CreateHeadersPayload();
@@ -221,9 +220,9 @@ namespace NBitcoin.Altcoins
 			private byte[] CalculateHash(byte[] data, int offset, int count)
 			{
 				byte[] hashData = data.SafeSubarray(offset, count);
-				uint256 hash = null;
+				uint256 hash;
 				if (this.nVersion > 6)
-					hash = Hashes.Hash256(hashData);
+					hash = Hashes.DoubleSHA256(hashData);
 				else
 				{
 					var x13 = new X13();
@@ -359,8 +358,8 @@ namespace NBitcoin.Altcoins
 				TxOutList voutTemp = new TxOutList();
 
 				// Try to read the vin. In case the dummy is there, this will be read as an empty vector.
-				stream.ReadWrite<TxInList, TxIn>(ref vinTemp);
-
+				stream.ReadWrite(ref vinTemp);
+				vinTemp.Transaction = this;
 				var hasNoDummy = (nVersionTemp & NoDummyInput) != 0 && vinTemp.Count == 0;
 				if (witSupported && hasNoDummy)
 					nVersionTemp = nVersionTemp & ~NoDummyInput;
@@ -372,9 +371,9 @@ namespace NBitcoin.Altcoins
 					if (flags != 0)
 					{
 						// Assume we read a dummy and a flag.
-						stream.ReadWrite<TxInList, TxIn>(ref vinTemp);
+						stream.ReadWrite(ref vinTemp);
 						vinTemp.Transaction = this;
-						stream.ReadWrite<TxOutList, TxOut>(ref voutTemp);
+						stream.ReadWrite(ref voutTemp);
 						voutTemp.Transaction = this;
 					}
 					else
@@ -387,7 +386,7 @@ namespace NBitcoin.Altcoins
 				else
 				{
 					// We read a non-empty vin. Assume a normal vout follows.
-					stream.ReadWrite<TxOutList, TxOut>(ref voutTemp);
+					stream.ReadWrite(ref voutTemp);
 					voutTemp.Transaction = this;
 				}
 				if (((flags & 1) != 0) && witSupported)
@@ -434,14 +433,14 @@ namespace NBitcoin.Altcoins
 				{
 					// Use extended format in case witnesses are to be serialized.
 					TxInList vinDummy = new TxInList();
-					stream.ReadWrite<TxInList, TxIn>(ref vinDummy);
+					stream.ReadWrite(ref vinDummy);
 					stream.ReadWrite(ref flags);
 				}
 				TxInList vin = this.Inputs;
-				stream.ReadWrite<TxInList, TxIn>(ref vin);
+				stream.ReadWrite(ref vin);
 				vin.Transaction = this;
 				TxOutList vout = this.Outputs;
-				stream.ReadWrite<TxOutList, TxOut>(ref vout);
+				stream.ReadWrite(ref vout);
 				vout.Transaction = this;
 				if ((flags & 1) != 0)
 				{
@@ -525,7 +524,8 @@ namespace NBitcoin.Altcoins
 				MinerConfirmationWindow = 2016,
 				CoinType = 105,
 				CoinbaseMaturity = 50,
-				ConsensusFactory = StratisConsensusFactory.Instance
+				ConsensusFactory = StratisConsensusFactory.Instance,
+				SupportSegwit = true
 			})
 			.SetBase58Bytes(Base58Type.PUBKEY_ADDRESS, new byte[] { 63 })
 			.SetBase58Bytes(Base58Type.SCRIPT_ADDRESS, new byte[] { 125 })

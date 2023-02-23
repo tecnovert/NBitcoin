@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 
 namespace NBitcoin
 {
-	public class BitcoinWitPubKeyAddress : BitcoinAddress, IBech32Data, IPubkeyHashUsable
+	public class BitcoinWitPubKeyAddress : BitcoinAddress, IBech32Data
 	{
 		public BitcoinWitPubKeyAddress(string bech32, Network expectedNetwork)
 				: base(Validate(bech32, expectedNetwork), expectedNetwork)
@@ -17,10 +17,16 @@ namespace NBitcoin
 			{
 				byte witVersion;
 				var decoded = encoder.Decode(bech32, out witVersion);
+				if (witVersion != 0)
+					throw expectedNetwork.Bech32NotSupported(Bech32Type.WITNESS_PUBKEY_ADDRESS);
 				_Hash = new WitKeyId(decoded);
 			}
 			else
 				throw expectedNetwork.Bech32NotSupported(Bech32Type.WITNESS_PUBKEY_ADDRESS);
+		}
+		internal BitcoinWitPubKeyAddress(string str, byte[] key, Network network) : base(str, network)
+		{
+			_Hash = new WitKeyId(key);
 		}
 
 		private static string Validate(string bech32, Network expectedNetwork)
@@ -60,22 +66,6 @@ namespace NBitcoin
 			return null;
 		}
 
-		public bool VerifyMessage(string message, string signature)
-		{
-			if (message == null)
-				throw new ArgumentNullException(nameof(message));
-			if (signature == null)
-				throw new ArgumentNullException(nameof(signature));
-			var key = PubKey.RecoverFromMessage(message, signature);
-			return key.WitHash == Hash;
-		}
-
-		public bool VerifyMessage(byte[] message, byte[] signature)
-		{
-			var key = PubKey.RecoverFromMessage(message, signature);
-			return key.WitHash == Hash;
-		}
-
 		WitKeyId _Hash;
 		public WitKeyId Hash
 		{
@@ -88,7 +78,7 @@ namespace NBitcoin
 
 		protected override Script GeneratePaymentScript()
 		{
-			return PayToWitTemplate.Instance.GenerateScriptPubKey(OpcodeType.OP_0, Hash._DestBytes);
+			return PayToWitTemplate.Instance.GenerateScriptPubKey(OpcodeType.OP_0, Hash.ToBytes());
 		}
 
 		public Bech32Type Type
@@ -100,19 +90,23 @@ namespace NBitcoin
 		}
 	}
 
-	public class BitcoinWitScriptAddress : BitcoinAddress, IBech32Data, IPubkeyHashUsable
+	public class BitcoinWitScriptAddress : BitcoinAddress, IBech32Data
 	{
 		public BitcoinWitScriptAddress(string bech32, Network expectedNetwork)
 				: base(Validate(bech32, expectedNetwork), expectedNetwork)
 		{
 			if (expectedNetwork.GetBech32Encoder(Bech32Type.WITNESS_SCRIPT_ADDRESS, false) is Bech32Encoder encoder)
 			{
-				byte witVersion;
-				var decoded = encoder.Decode(bech32, out witVersion);
+				var decoded = encoder.Decode(bech32, out _);
 				_Hash = new WitScriptId(decoded);
 			}
 			else
 				throw expectedNetwork.Bech32NotSupported(Bech32Type.WITNESS_SCRIPT_ADDRESS);
+		}
+
+		internal BitcoinWitScriptAddress(string str, byte[] keyId, Network network) : base(str, network)
+		{
+			_Hash = new WitScriptId(keyId);
 		}
 
 		private static string Validate(string bech32, Network expectedNetwork)
@@ -153,19 +147,6 @@ namespace NBitcoin
 			return null;
 		}
 
-		public bool VerifyMessage(string message, string signature)
-		{
-			var key = PubKey.RecoverFromMessage(message, signature);
-			return key.WitHash.ScriptPubKey.WitHash == Hash;
-		}
-
-		public bool VerifyMessage(byte[] message, byte[] signature)
-		{
-			var key = PubKey.RecoverFromMessage(message, signature);
-			return key.WitHash.ScriptPubKey.WitHash == Hash;
-		}
-
-
 		WitScriptId _Hash;
 		public WitScriptId Hash
 		{
@@ -177,7 +158,7 @@ namespace NBitcoin
 
 		protected override Script GeneratePaymentScript()
 		{
-			return PayToWitTemplate.Instance.GenerateScriptPubKey(OpcodeType.OP_0, Hash._DestBytes);
+			return PayToWitTemplate.Instance.GenerateScriptPubKey(OpcodeType.OP_0, Hash.ToBytes());
 		}
 
 		public Bech32Type Type

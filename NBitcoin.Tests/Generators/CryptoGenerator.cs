@@ -4,6 +4,7 @@ using FsCheck;
 using System.Collections.Generic;
 using Microsoft.FSharp.Collections;
 using System.Linq;
+using Microsoft.FSharp.Core;
 using NBitcoin.Crypto;
 
 namespace NBitcoin.Tests.Generators
@@ -22,7 +23,18 @@ namespace NBitcoin.Tests.Generators
 
 		public static Arbitrary<KeyPath> ExtPathArb() =>
 			Arb.From(KeyPath());
+		public static Arbitrary<ECDSASignature> ECDSASignatureArb() =>
+			Arb.From(ECDSA());
 
+#if HAS_SPAN
+		public static Arbitrary<TaprootInternalPubKey> TaprootInternalPubKeyArb() =>
+			Arb.From(TaprootInternalPubKey());
+		public static Arbitrary<TaprootFullPubKey> TaprootFullPubKeyArb() =>
+			Arb.From(TaprootFullPubKey());
+#endif
+
+		public static Arbitrary<uint256> UInt256Arb() =>
+			Arb.From(Hash256());
 		public static Gen<Key> PrivateKey() => Gen.Fresh(() => new Key());
 
 		public static Gen<List<Key>> PrivateKeys(int n) =>
@@ -42,6 +54,16 @@ namespace NBitcoin.Tests.Generators
 		public static Gen<List<PubKey>> PublicKeys(int n) =>
 			from pks in Gen.ListOf(n, PublicKey())
 			select pks.ToList();
+
+#if HAS_SPAN
+		public static Gen<TaprootInternalPubKey> TaprootInternalPubKey() =>
+			from pk in PublicKey()
+			select pk.TaprootInternalKey;
+
+		public static Gen<TaprootFullPubKey> TaprootFullPubKey() =>
+			from pk in PublicKey()
+			select pk.GetTaprootFullPubKey();
+#endif
 
 		#region hash
 		public static Gen<uint256> Hash256() =>
@@ -94,5 +116,24 @@ namespace NBitcoin.Tests.Generators
 			select NBitcoin.KeyPath.FromBytes(flattenBytes);
 
 		public static Gen<ExtPubKey> ExtPubKey() => ExtKey().Select(ek => ek.Neuter());
+
+		public static Gen<BitcoinExtPubKey> BitcoinExtPubKey() =>
+			from extKey in ExtPubKey()
+			from network in ChainParamsGenerator.NetworkGen()
+			select new BitcoinExtPubKey(extKey, network);
+
+		public static Gen<BitcoinExtKey> BitcoinExtKey() =>
+			from extKey in ExtKey()
+			from network in ChainParamsGenerator.NetworkGen()
+			select new BitcoinExtKey(extKey, network);
+
+		public static Gen<RootedKeyPath> RootedKeyPath() =>
+			from parentFingerPrint in HDFingerPrint()
+			from kp in KeyPath()
+			select new RootedKeyPath(parentFingerPrint, kp);
+
+		public static Gen<HDFingerprint> HDFingerPrint() =>
+			from x in PrimitiveGenerator.UInt32()
+			select new HDFingerprint(x);
 	}
 }

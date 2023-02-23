@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using Xunit;
 using NBitcoin.Crypto;
+using NBitcoin.DataEncoders;
 
 namespace NBitcoin.Tests
 {
@@ -54,7 +55,7 @@ namespace NBitcoin.Tests
 			var byteArray2 = new byte[] { 1, 2, 3, 4 };
 
 			var filter = new GolombRiceFilterBuilder()
-				.SetKey(Hashes.Hash256(new byte[] { 99, 99, 99, 99 }))
+				.SetKey(Hashes.DoubleSHA256(new byte[] { 99, 99, 99, 99 }))
 				.AddEntries(new[] { byteArray0, byteArray1, byteArray2 })
 				.AddScriptPubkey(Script.FromBytesUnsafe(byteArray0))
 				.AddScriptPubkey(Script.FromBytesUnsafe(byteArray1))
@@ -70,7 +71,7 @@ namespace NBitcoin.Tests
 			var names = from name in new[] { "New York", "Amsterdam", "Paris", "Buenos Aires", "La Habana" }
 						select Encoding.ASCII.GetBytes(name);
 
-			var key = Hashes.Hash256(new byte[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 });
+			var key = Hashes.DoubleSHA256(new byte[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 });
 			var filter = new GolombRiceFilterBuilder()
 				.SetKey(key)
 				.AddEntries(names)
@@ -129,7 +130,7 @@ namespace NBitcoin.Tests
 			const int avgTxoutPushDataSize = 20;        // P2PKH scripts has 20 bytes.
 			const int walletAddressCount = 1_000;       // We estimate that our user will have 1000 addresses.
 
-			var key = Hashes.Hash256(new byte[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 });
+			var key = Hashes.DoubleSHA256(new byte[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 });
 			var testKey = key.ToBytes().SafeSubarray(0, 16);
 
 			// Generation of data to be added into the filter
@@ -173,7 +174,7 @@ namespace NBitcoin.Tests
 					falsePositiveCount++;
 			}
 
-			Assert.True(falsePositiveCount < 5);
+			Assert.True(falsePositiveCount <= 2);
 
 			// Filter has to mat existing values
 			var falseNegativeCount = 0;
@@ -184,6 +185,7 @@ namespace NBitcoin.Tests
 					falseNegativeCount++;
 			}
 
+			// False negatives have to be always zero.
 			Assert.Equal(0, falseNegativeCount);
 		}
 
@@ -195,7 +197,7 @@ namespace NBitcoin.Tests
 			var byteArray1 = new byte[] { 2, 3, 4 };
 			var byteArray2 = new byte[] { 3, 4 };
 
-			var key = Hashes.Hash256(new byte[] { 99, 99, 99, 99 });
+			var key = Hashes.DoubleSHA256(new byte[] { 99, 99, 99, 99 });
 			var testKey = key.ToBytes().SafeSubarray(0, 16);
 
 			var filter = new GolombRiceFilterBuilder()
@@ -426,11 +428,11 @@ namespace NBitcoin.Tests
 			var scripts = new List<Script>();
 			for (var i = 0; i < 10_000; i++)
 			{
-				var script = new Key().PubKey.GetSegwitAddress(Network.Main).ScriptPubKey;
+				var script = new Key().PubKey.GetAddress(ScriptPubKeyType.Segwit, Network.Main).ScriptPubKey;
 				scripts.Add(script);
 			}
 
-			var key = Hashes.Hash256(Encoding.ASCII.GetBytes("A key for testing"));
+			var key = Hashes.DoubleSHA256(Encoding.ASCII.GetBytes("A key for testing"));
 			var builder = new GolombRiceFilterBuilder()
 				.SetKey(key)
 				.SetP(0x20);
@@ -448,6 +450,24 @@ namespace NBitcoin.Tests
 				var match = filter.MatchAny(new[] { script.ToBytes() }, keyMatch);
 				Assert.True(match);
 			}
+		}
+
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void EdgeCaseSipHashEqualZero()
+		{
+			var dummyScriptPubKey = Encoders.Hex.DecodeData("0009BBE4C2D17185643765C265819BF5261755247D");
+			var blockHash = Encoders.Hex.DecodeData("CB4D1D1ED725B888173BEF553BBE2BF4237B42364BC90638F0CB040F87B57CD4");
+			var filter = new GolombRiceFilterBuilder()
+				.SetKey(new uint256(blockHash))
+				.SetP(20)
+				.SetM(1 << 20)
+				.AddEntries(new[]{ dummyScriptPubKey })
+				.Build();
+
+			var scriptPubKey = Encoders.Hex.DecodeData("D432CB07482718ECE932DA6914D1FDC1A8EACE3F127D");
+			var key = blockHash.SafeSubarray(0, 16);
+			Assert.False(filter.Match(scriptPubKey, key));
 		}
 	}
 }

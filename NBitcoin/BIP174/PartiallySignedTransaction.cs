@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -6,6 +7,7 @@ using NBitcoin.DataEncoders;
 using Newtonsoft.Json;
 using UnKnownKVMap = System.Collections.Generic.SortedDictionary<byte[], byte[]>;
 using NBitcoin.BuilderExtensions;
+using System.Diagnostics.CodeAnalysis;
 
 namespace NBitcoin
 {
@@ -50,6 +52,12 @@ namespace NBitcoin
 		public const byte PSBT_IN_BIP32_DERIVATION = 0x06;
 		public const byte PSBT_IN_SCRIPTSIG = 0x07;
 		public const byte PSBT_IN_SCRIPTWITNESS = 0x08;
+		public const byte PSBT_OUT_TAP_INTERNAL_KEY = 0x05;
+		public const byte PSBT_IN_TAP_KEY_SIG = 0x13;
+		public const byte PSBT_IN_TAP_INTERNAL_KEY = 0x17;
+		public const byte PSBT_IN_TAP_BIP32_DERIVATION = 0x16;
+		public const byte PSBT_OUT_TAP_BIP32_DERIVATION = 0x07;
+		public const byte PSBT_IN_TAP_MERKLE_ROOT = 0x18;
 
 		// Output types
 		public const byte PSBT_OUT_REDEEMSCRIPT = 0x00;
@@ -65,28 +73,23 @@ namespace NBitcoin
 	public class PSBTSettings
 	{
 		/// <summary>
-		/// Test vector in the bip174 specify to use a signer which follows RFC 6979.
-		/// So we must sign without [LowR value assured way](https://github.com/MetacoSA/NBitcoin/pull/510)
-		/// This should be turned false only in the test.
-		/// ref: https://github.com/bitcoin/bitcoin/pull/13666
-		/// </summary>
-		public bool UseLowR { get; set; } = true;
-
-		/// <summary>
 		/// Use custom builder extensions to customize finalization
 		/// </summary>
-		public IEnumerable<BuilderExtension> CustomBuilderExtensions { get; set; }
+		public IEnumerable<BuilderExtension>? CustomBuilderExtensions { get; set; }
 
 		/// <summary>
 		/// Try to do anything that is possible to deduce PSBT information from input information
 		/// </summary>
 		public bool IsSmart { get; set; } = true;
+		public bool SkipVerifyScript { get; set; } = false;
+		public SigningOptions SigningOptions { get; set; } = new SigningOptions();
+		public ScriptVerify ScriptVerify { get; internal set; } = ScriptVerify.Standard;
 
 		public PSBTSettings Clone()
 		{
 			return new PSBTSettings()
 			{
-				UseLowR = UseLowR,
+				SigningOptions = SigningOptions.Clone(),
 				CustomBuilderExtensions = CustomBuilderExtensions?.ToArray(),
 				IsSmart = IsSmart
 			};
@@ -97,8 +100,10 @@ namespace NBitcoin
 	{
 		// Magic bytes
 		readonly static byte[] PSBT_MAGIC_BYTES = Encoders.ASCII.DecodeData("psbt\xff");
-		internal byte[] _XPubVersionBytes;
-		byte[] XPubVersionBytes => _XPubVersionBytes = _XPubVersionBytes ?? Network.GetVersionBytes(Base58Type.EXT_PUBLIC_KEY, false);
+		internal byte[]? _XPubVersionBytes;
+
+		byte[] XPubVersionBytes => _XPubVersionBytes = _XPubVersionBytes ?? Network.GetVersionBytes(Base58Type.EXT_PUBLIC_KEY, true)
+																		 ?? throw new InvalidOperationException("The network does not allow xpubs");
 		internal Transaction tx;
 
 		public SortedDictionary<BitcoinExtPubKey, RootedKeyPath> GlobalXPubs { get; } = new SortedDictionary<BitcoinExtPubKey, RootedKeyPath>(BitcoinExtPubKeyComparer.Instance);
@@ -109,8 +114,14 @@ namespace NBitcoin
 
 			}
 			public static BitcoinExtPubKeyComparer Instance { get; } = new BitcoinExtPubKeyComparer();
-			public int Compare(BitcoinExtPubKey x, BitcoinExtPubKey y)
+			public int Compare(BitcoinExtPubKey? x, BitcoinExtPubKey? y)
 			{
+				if (x is null && y is null)
+					return 0;
+				if (x is null)
+					return -1;
+				if (y is null)
+					return 1;
 				return BytesComparer.Instance.Compare(x.ExtPubKey.ToBytes(), y.ExtPubKey.ToBytes());
 			}
 		}
@@ -135,7 +146,7 @@ namespace NBitcoin
 
 			return Load(raw, network);
 		}
-		public static bool TryParse(string hexOrBase64, Network network, out PSBT psbt)
+		public static bool TryParse(string hexOrBase64, Network network, [MaybeNullWhen(false)] out PSBT psbt)
 		{
 			if (hexOrBase64 == null)
 				throw new ArgumentNullException(nameof(hexOrBase64));
@@ -161,6 +172,11 @@ namespace NBitcoin
 			stream.ConsensusFactory = network.Consensus.ConsensusFactory;
 			var ret = new PSBT(stream, network);
 			return ret;
+		}
+
+		internal ConsensusFactory GetConsensusFactory()
+		{
+			return Network.Consensus.ConsensusFactory;
 		}
 
 		public Network Network { get; }
@@ -202,7 +218,6 @@ namespace NBitcoin
 			// It will be reassigned in `ReadWriteAsVarString` so no worry to assign 0 length array here.
 			byte[] k = new byte[0];
 			byte[] v = new byte[0];
-			var txFound = false;
 			stream.ReadWriteAsVarString(ref k);
 			while (k.Length != 0)
 			{
@@ -222,7 +237,6 @@ namespace NBitcoin
 							throw new FormatException("Malformed global tx. Unexpected size.");
 						if (tx.Inputs.Any(txin => txin.ScriptSig != Script.Empty || txin.WitScript != WitScript.Empty))
 							throw new FormatException("Malformed global tx. It should not contain any scriptsig or witness by itself");
-						txFound = true;
 						break;
 					case PSBTConstants.PSBT_GLOBAL_XPUB when XPubVersionBytes != null:
 						if (k.Length != 1 + XPubVersionBytes.Length + 74)
@@ -246,7 +260,7 @@ namespace NBitcoin
 				}
 				stream.ReadWriteAsVarString(ref k);
 			}
-			if (!txFound)
+			if (tx is null)
 				throw new FormatException("Invalid PSBT. No global TX");
 
 			int i = 0;
@@ -268,16 +282,18 @@ namespace NBitcoin
 			}
 			if (i != tx.Outputs.Count)
 				throw new FormatException("Invalid PSBT. Number of outputs does not match to the global tx");
+			// tx should never be null, but dotnet compiler complains...
+			tx = tx ?? Network.CreateTransaction();
 		}
 
-		public PSBT AddCoins(params ICoin[] coins)
+		public PSBT AddCoins(params ICoin?[] coins)
 		{
 			if (coins == null)
 				return this;
-			if (IsAllFinalized())
-				return this;
 			foreach (var coin in coins)
 			{
+				if (coin is null)
+					continue;
 				var indexedInput = this.Inputs.FindIndexedInput(coin.Outpoint);
 				if (indexedInput == null)
 					continue;
@@ -285,6 +301,8 @@ namespace NBitcoin
 			}
 			foreach (var coin in coins)
 			{
+				if (coin is null)
+					continue;
 				foreach (var output in this.Outputs)
 				{
 					if (output.ScriptPubKey == coin.TxOut.ScriptPubKey)
@@ -318,23 +336,14 @@ namespace NBitcoin
 				txsById.TryAdd(tx.GetHash(), tx);
 			foreach (var input in Inputs)
 			{
-				if (input.IsFinalized())
-					continue;
-				if (input.WitnessUtxo == null && txsById.TryGetValue(input.TxIn.PrevOut.Hash, out var tx))
+				if (txsById.TryGetValue(input.TxIn.PrevOut.Hash, out var tx))
 				{
 					if (input.TxIn.PrevOut.N >= tx.Outputs.Count)
 						continue;
 					var output = tx.Outputs[input.TxIn.PrevOut.N];
-					if (output.ScriptPubKey.IsScriptType(ScriptType.Witness) || input.RedeemScript?.IsScriptType(ScriptType.Witness) is true)
-					{
+					input.NonWitnessUtxo = tx;
+					if (input.GetCoin()?.IsMalleable is false)
 						input.WitnessUtxo = output;
-						input.NonWitnessUtxo = null;
-					}
-					else
-					{
-						input.WitnessUtxo = null;
-						input.NonWitnessUtxo = tx;
-					}
 				}
 			}
 			return this;
@@ -343,9 +352,12 @@ namespace NBitcoin
 		/// <summary>
 		/// If an other PSBT has a specific field and this does not have it, then inject that field to this.
 		/// otherwise leave it as it is.
+		///
+		/// If you need to call this on transactions with different global transaction, use <see cref="PSBT.UpdateFrom(PSBT)"/> instead.
 		/// </summary>
-		/// <param name="other"></param>
-		/// <returns></returns>
+		/// <param name="other">Another PSBT to takes information from</param>
+		/// <exception cref="System.ArgumentException">Can not Combine PSBT with different global tx.</exception>
+		/// <returns>This instance</returns>
 		public PSBT Combine(PSBT other)
 		{
 			if (other == null)
@@ -356,11 +368,46 @@ namespace NBitcoin
 			if (other.tx.GetHash() != this.tx.GetHash())
 				throw new ArgumentException(paramName: nameof(other), message: "Can not Combine PSBT with different global tx.");
 
+			foreach (var xpub in other.GlobalXPubs)
+				this.GlobalXPubs.TryAdd(xpub.Key, xpub.Value);
+
 			for (int i = 0; i < Inputs.Count; i++)
-				this.Inputs[i].Combine(other.Inputs[i]);
+				this.Inputs[i].UpdateFrom(other.Inputs[i]);
 
 			for (int i = 0; i < Outputs.Count; i++)
-				this.Outputs[i].Combine(other.Outputs[i]);
+				this.Outputs[i].UpdateFrom(other.Outputs[i]);
+
+			foreach (var uk in other.unknown)
+				this.unknown.TryAdd(uk.Key, uk.Value);
+
+			return this;
+		}
+
+		/// <summary>
+		/// If an other PSBT has a specific field and this does not have it, then inject that field to this.
+		/// otherwise leave it as it is.
+		///
+		/// Contrary to <see cref="PSBT.Combine(PSBT)"/>, it can be called on PSBT with a different global transaction.
+		/// </summary>
+		/// <param name="other">Another PSBT to takes information from</param>
+		/// <returns>This instance</returns>
+		public PSBT UpdateFrom(PSBT other)
+		{
+			if (other == null)
+			{
+				throw new ArgumentNullException(nameof(other));
+			}
+
+			foreach (var xpub in other.GlobalXPubs)
+				this.GlobalXPubs.TryAdd(xpub.Key, xpub.Value);
+
+			foreach (var otherInput in other.Inputs)
+				this.Inputs.FindIndexedInput(otherInput.PrevOut)?.UpdateFrom(otherInput);
+
+
+			foreach (var otherOutput in other.Outputs)
+				foreach (var thisOutput in this.Outputs.Where(o => o.ScriptPubKey == otherOutput.ScriptPubKey))
+					thisOutput.UpdateFrom(otherOutput);
 
 			foreach (var uk in other.unknown)
 				this.unknown.TryAdd(uk.Key, uk.Value);
@@ -404,12 +451,13 @@ namespace NBitcoin
 			return this;
 		}
 
-		public bool TryFinalize(out IList<PSBTError> errors)
+		public bool TryFinalize([MaybeNullWhen(true)] out IList<PSBTError> errors)
 		{
+			var signingOptions = GetSigningOptions(null);
 			var localErrors = new List<PSBTError>();
 			foreach (var input in Inputs)
 			{
-				if (!input.TryFinalizeInput(out var e))
+				if (!input.TryFinalizeInput(signingOptions, out var e))
 				{
 					localErrors.AddRange(e);
 				}
@@ -423,11 +471,22 @@ namespace NBitcoin
 			return true;
 		}
 
+		internal SigningOptions GetSigningOptions(SigningOptions? signingOptions)
+		{
+			signingOptions ??= Settings.SigningOptions;
+			if (signingOptions.PrecomputedTransactionData is null)
+			{
+				signingOptions = signingOptions.Clone();
+				signingOptions.PrecomputedTransactionData = PrecomputeTransactionData();
+			}
+			return signingOptions;
+		}
+
 		public bool IsReadyToSign()
 		{
 			return IsReadyToSign(out _);
 		}
-		public bool IsReadyToSign(out PSBTError[] errors)
+		public bool IsReadyToSign([MaybeNullWhen(true)] out PSBTError[] errors)
 		{
 			var errorList = new List<PSBTError>();
 			foreach (var input in Inputs)
@@ -463,11 +522,11 @@ namespace NBitcoin
 		/// <param name="accountKeyPath">The account key path (eg. [masterFP]/49'/0'/0')</param>
 		/// <param name="sigHash">The SigHash</param>
 		/// <returns>This PSBT</returns>
-		public PSBT SignAll(ScriptPubKeyType scriptPubKeyType, IHDKey accountKey, RootedKeyPath accountKeyPath, SigHash sigHash = SigHash.All)
+		public PSBT SignAll(ScriptPubKeyType scriptPubKeyType, IHDKey accountKey, RootedKeyPath accountKeyPath)
 		{
 			if (accountKey == null)
 				throw new ArgumentNullException(nameof(accountKey));
-			return SignAll(new HDKeyScriptPubKey(accountKey, scriptPubKeyType), accountKey, accountKeyPath, sigHash);
+			return SignAll(new HDKeyScriptPubKey(accountKey, scriptPubKeyType), accountKey, accountKeyPath);
 		}
 
 		/// <summary>
@@ -477,11 +536,11 @@ namespace NBitcoin
 		/// <param name="accountKey">The account key with which to sign</param>
 		/// <param name="sigHash">The SigHash</param>
 		/// <returns>This PSBT</returns>
-		public PSBT SignAll(ScriptPubKeyType scriptPubKeyType, IHDKey accountKey, SigHash sigHash = SigHash.All)
+		public PSBT SignAll(ScriptPubKeyType scriptPubKeyType, IHDKey accountKey)
 		{
 			if (accountKey == null)
 				throw new ArgumentNullException(nameof(accountKey));
-			return SignAll(new HDKeyScriptPubKey(accountKey, scriptPubKeyType), accountKey, sigHash);
+			return SignAll(new HDKeyScriptPubKey(accountKey, scriptPubKeyType), accountKey);
 		}
 
 		/// <summary>
@@ -491,9 +550,9 @@ namespace NBitcoin
 		/// <param name="accountKey">The account key with which to sign</param>
 		/// <param name="sigHash">The SigHash</param>
 		/// <returns>This PSBT</returns>
-		public PSBT SignAll(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, SigHash sigHash = SigHash.All)
+		public PSBT SignAll(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey)
 		{
-			return SignAll(accountHDScriptPubKey, accountKey, null, sigHash);
+			return SignAll(accountHDScriptPubKey, accountKey, null);
 		}
 
 		/// <summary>
@@ -502,9 +561,8 @@ namespace NBitcoin
 		/// <param name="accountHDScriptPubKey">The address generator</param>
 		/// <param name="accountKey">The account key with which to sign</param>
 		/// <param name="accountKeyPath">The account key path (eg. [masterFP]/49'/0'/0')</param>
-		/// <param name="sigHash">The SigHash</param>
 		/// <returns>This PSBT</returns>
-		public PSBT SignAll(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath accountKeyPath, SigHash sigHash = SigHash.All)
+		public PSBT SignAll(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath? accountKeyPath)
 		{
 			if (accountKey == null)
 				throw new ArgumentNullException(nameof(accountKey));
@@ -513,9 +571,12 @@ namespace NBitcoin
 			accountHDScriptPubKey = accountHDScriptPubKey.AsHDKeyCache();
 			accountKey = accountKey.AsHDKeyCache();
 			Money total = Money.Zero;
+
+			var signingOptions = GetSigningOptions(null);
+
 			foreach (var o in Inputs.CoinsFor(accountHDScriptPubKey, accountKey, accountKeyPath))
 			{
-				o.TrySign(accountHDScriptPubKey, accountKey, accountKeyPath, sigHash);
+				o.TrySign(accountHDScriptPubKey, accountKey, accountKeyPath, signingOptions);
 			}
 			return this;
 		}
@@ -548,7 +609,7 @@ namespace NBitcoin
 		/// </summary>
 		/// <param name="estimatedFeeRate"></param>
 		/// <returns>True if could get the estimated fee rate</returns>
-		public bool TryGetEstimatedFeeRate(out FeeRate estimatedFeeRate)
+		public bool TryGetEstimatedFeeRate([MaybeNullWhen(false)] out FeeRate estimatedFeeRate)
 		{
 			if (IsAllFinalized())
 			{
@@ -576,6 +637,32 @@ namespace NBitcoin
 		}
 
 		/// <summary>
+		/// Returns the virtual transaction size of the transaction. If the PSBT is finalized, then the exact virtual size.
+		/// </summary>
+		/// <param name="vsize">The calculated virtual size</param>
+		/// <returns>True if could get the virtual size could get estimated</returns>
+		public bool TryGetVirtualSize(out int vsize)
+		{
+			if (IsAllFinalized())
+			{
+				vsize = ExtractTransaction().GetVirtualSize();
+				return true;
+			}
+			var transactionBuilder = CreateTransactionBuilder();
+			transactionBuilder.AddCoins(GetAllCoins());
+			try
+			{
+				vsize = transactionBuilder.EstimateSize(this.tx, true);
+				return true;
+			}
+			catch
+			{
+				vsize = -1;
+				return false;
+			}
+		}
+
+		/// <summary>
 		/// Returns the fee rate of the transaction. If the PSBT is finalized, then the exact rate is returned, else an estimation is made.
 		/// </summary>
 		/// <returns>The estimated fee</returns>
@@ -587,26 +674,72 @@ namespace NBitcoin
 			return feeRate;
 		}
 
-		public PSBT SignWithKeys(params Key[] keys)
-		{
-			return SignWithKeys(SigHash.All, keys);
-		}
 		public PSBT SignWithKeys(params ISecret[] keys)
 		{
-			return SignWithKeys(SigHash.All, keys.Select(k => k.PrivateKey).ToArray());
+			return SignWithKeys(keys.Select(k => k.PrivateKey).ToArray());
 		}
 
-		public PSBT SignWithKeys(SigHash sigHash, params Key[] keys)
+		public PSBT SignWithKeys(params Key[] keys)
 		{
 			AssertSanity();
+			var signingOptions = GetSigningOptions(null);
 			foreach (var key in keys)
 			{
 				foreach (var input in this.Inputs)
 				{
-					input.Sign(key, sigHash);
+					input.Sign(key, signingOptions);
 				}
 			}
 			return this;
+		}
+
+		/// <summary>
+		/// Returns a data structure precomputing some hash values that are needed for all inputs to be signed in the transaction.
+		/// </summary>
+		/// <returns>The PrecomputedTransactionData</returns>
+		/// <exception cref="NBitcoin.PSBTException">Throw if the PSBT is missing some previous outputs.</exception>
+		public PrecomputedTransactionData PrecomputeTransactionData()
+		{
+			var outputs = GetSpentTxOuts(out var errors);
+			if (errors != null)
+				return tx.PrecomputeTransactionData();
+			return tx.PrecomputeTransactionData(outputs);
+		}
+
+		public TransactionValidator CreateTransactionValidator()
+		{
+			var outputs = GetSpentTxOuts(out var errors);
+			if (errors != null)
+				throw new PSBTException(errors);
+			return tx.CreateValidator(outputs);
+		}
+		internal bool TryCreateTransactionValidator([MaybeNullWhen(false)] out TransactionValidator validator, [MaybeNullWhen(true)] out IList<PSBTError> errors)
+		{
+			var outputs = GetSpentTxOuts(out errors);
+			if (errors != null)
+			{
+				validator = null;
+				return false;
+			}
+			validator = tx.CreateValidator(outputs);
+			return true;
+		}
+
+		private TxOut[] GetSpentTxOuts(out IList<PSBTError>? errors)
+		{
+			errors = null;
+			TxOut[] spentOutputs = new TxOut[Inputs.Count];
+			foreach (var input in Inputs)
+			{
+				if (input.GetTxOut() is TxOut txOut)
+					spentOutputs[input.Index] = txOut;
+				else
+				{
+					errors ??= new List<PSBTError>();
+					errors.Add(new PSBTError((uint)input.Index, "Some inputs are missing witness_utxo or non_witness_utxo"));
+				}
+			}
+			return spentOutputs;
 		}
 
 		internal TransactionBuilder CreateTransactionBuilder()
@@ -617,15 +750,24 @@ namespace NBitcoin
 				transactionBuilder.Extensions.Clear();
 				transactionBuilder.Extensions.AddRange(Settings.CustomBuilderExtensions);
 			}
-			transactionBuilder.UseLowR = Settings.UseLowR;
+			transactionBuilder.SetSigningOptions(Settings.SigningOptions.Clone());
 			return transactionBuilder;
 		}
 
 		private IEnumerable<ICoin> GetAllCoins()
 		{
-			return this.Inputs.Select(i => i.GetSignableCoin() ?? i.GetCoin()).Where(c => c != null).ToArray();
+			foreach (var c in this.Inputs.Select(i => i.GetSignableCoin() ?? i.GetCoin()))
+			{
+				if (c is null)
+					continue;
+				yield return c;
+			}
 		}
-
+		/// <summary>
+		/// Extract the fully signed transaction from the PSBT
+		/// </summary>
+		/// <returns>The fully signed transaction</returns>
+		/// <exception cref="System.InvalidOperationException">PSBTInputs are not all finalized</exception>
 		public Transaction ExtractTransaction()
 		{
 			if (!this.CanExtractTransaction())
@@ -661,6 +803,52 @@ namespace NBitcoin
 				throw new PSBTException(errors);
 		}
 
+
+		/// <summary>
+		/// Get the expected hash once the transaction is fully signed
+		/// </summary>
+		/// <param name="hash">The hash once fully signed</param>
+		/// <returns>True if we can know the expected hash. False if we can't (unsigned non-segwit).</returns>
+		public bool TryGetFinalizedHash([MaybeNullWhen(false)] out uint256 hash)
+		{
+			var tx = GetGlobalTransaction();
+			for (int i = 0; i < Inputs.Count; i++)
+			{
+				var utxo = Inputs[i].GetTxOut();
+				if (Inputs[i].IsFinalized())
+				{
+					tx.Inputs[i].ScriptSig = Inputs[i].FinalScriptSig ?? Script.Empty;
+					tx.Inputs[i].WitScript = Inputs[i].FinalScriptWitness ?? Script.Empty;
+					if (tx.Inputs[i].ScriptSig == Script.Empty
+						&& (utxo is null || utxo.ScriptPubKey.IsScriptType(ScriptType.P2SH)))
+					{
+						hash = null;
+						return false;
+					}
+				}
+				else if (utxo is null ||
+						!Network.Consensus.SupportSegwit)
+				{
+					hash = null;
+					return false;
+				}
+				else if (utxo.ScriptPubKey.IsScriptType(ScriptType.P2SH) &&
+					Inputs[i].RedeemScript is Script p2shRedeem &&
+					(p2shRedeem.IsScriptType(ScriptType.P2WSH) ||
+					 p2shRedeem.IsScriptType(ScriptType.P2WPKH)))
+				{
+					tx.Inputs[i].ScriptSig = PayToScriptHashTemplate.Instance.GenerateScriptSig(null as byte[][], p2shRedeem);
+				}
+				else if (utxo.ScriptPubKey.IsMalleable)
+				{
+					hash = null;
+					return false;
+				}
+			}
+			hash = tx.GetHash();
+			return true;
+		}
+
 		#region IBitcoinSerializable Members
 
 		private static uint defaultKeyLen = 1;
@@ -688,7 +876,8 @@ namespace NBitcoin
 				stream.ReadWrite(PSBTConstants.PSBT_GLOBAL_XPUB);
 				var vb = XPubVersionBytes;
 				stream.ReadWrite(ref vb);
-				xpub.Key.ExtPubKey.ReadWrite(stream);
+				var bytes = xpub.Key.ExtPubKey.ToBytes();
+				stream.ReadWrite(ref bytes);
 				var path = xpub.Value.KeyPath.ToBytes();
 				var pathInfo = xpub.Value.MasterFingerprint.ToBytes().Concat(path);
 				stream.ReadWriteAsVarString(ref pathInfo);
@@ -746,8 +935,7 @@ namespace NBitcoin
 			}
 			jsonWriter.WritePropertyName("tx");
 			jsonWriter.WriteStartObject();
-			var formatter = new RPC.BlockExplorerFormatter();
-			formatter.WriteTransaction2(jsonWriter, tx);
+			RPC.BlockExplorerFormatter.WriteTransaction(jsonWriter, tx);
 			jsonWriter.WriteEndObject();
 			if (GlobalXPubs.Count != 0)
 			{
@@ -837,7 +1025,7 @@ namespace NBitcoin
 		public string ToBase64() => Encoders.Base64.EncodeData(this.ToBytes());
 		public string ToHex() => Encoders.Hex.EncodeData(this.ToBytes());
 
-		public override bool Equals(object obj)
+		public override bool Equals(object? obj)
 		{
 			var item = obj as PSBT;
 			if (item == null)
@@ -845,7 +1033,7 @@ namespace NBitcoin
 			return item.Equals(this);
 		}
 
-		public bool Equals(PSBT b)
+		public bool Equals(PSBT? b)
 		{
 			if (b is null)
 				return false;
@@ -909,7 +1097,7 @@ namespace NBitcoin
 		/// <param name="accountKey">The account key that will be used to sign (ie. 49'/0'/0')</param>
 		/// <param name="accountKeyPath">The account key path</param>
 		/// <returns>The balance change</returns>
-		public Money GetBalance(ScriptPubKeyType scriptPubKeyType, IHDKey accountKey, RootedKeyPath accountKeyPath = null)
+		public Money GetBalance(ScriptPubKeyType scriptPubKeyType, IHDKey accountKey, RootedKeyPath? accountKeyPath = null)
 		{
 			if (accountKey == null)
 				throw new ArgumentNullException(nameof(accountKey));
@@ -924,7 +1112,7 @@ namespace NBitcoin
 		/// <param name="accountKey">The account key that will be used to sign (ie. 49'/0'/0')</param>
 		/// <param name="accountKeyPath">The account key path</param>
 		/// <returns>The balance change</returns>
-		public Money GetBalance(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath accountKeyPath = null)
+		public Money GetBalance(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath? accountKeyPath = null)
 		{
 			if (accountHDScriptPubKey == null)
 				throw new ArgumentNullException(nameof(accountHDScriptPubKey));
@@ -947,7 +1135,7 @@ namespace NBitcoin
 		/// <param name="accountKey">The account key that will be used to sign (ie. 49'/0'/0')</param>
 		/// <param name="accountKeyPath">The account key path</param>
 		/// <returns>Inputs with HD keys matching masterFingerprint and account key</returns>
-		public IEnumerable<PSBTCoin> CoinsFor(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath accountKeyPath = null)
+		public IEnumerable<PSBTCoin> CoinsFor(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath? accountKeyPath = null)
 		{
 			if (accountKey == null)
 				throw new ArgumentNullException(nameof(accountKey));
@@ -966,7 +1154,7 @@ namespace NBitcoin
 		/// <param name="accountKey">The account key that will be used to sign (ie. 49'/0'/0')</param>
 		/// <param name="accountKeyPath">The account key path</param>
 		/// <returns>HD Keys matching master root key</returns>
-		public IEnumerable<PSBTHDKeyMatch> HDKeysFor(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath accountKeyPath = null)
+		public IEnumerable<PSBTHDKeyMatch> HDKeysFor(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath? accountKeyPath = null)
 		{
 			if (accountKey == null)
 				throw new ArgumentNullException(nameof(accountKey));
@@ -983,7 +1171,7 @@ namespace NBitcoin
 		/// <param name="accountKey">The account key that will be used to sign (ie. 49'/0'/0')</param>
 		/// <param name="accountKeyPath">The account key path</param>
 		/// <returns>HD Keys matching master root key</returns>
-		public IEnumerable<PSBTHDKeyMatch> HDKeysFor(IHDKey accountKey, RootedKeyPath accountKeyPath = null)
+		public IEnumerable<PSBTHDKeyMatch> HDKeysFor(IHDKey accountKey, RootedKeyPath? accountKeyPath = null)
 		{
 			if (accountKey == null)
 				throw new ArgumentNullException(nameof(accountKey));
@@ -1008,7 +1196,7 @@ namespace NBitcoin
 		/// <param name="masterKey">The master key of the keypaths</param>
 		/// <param name="paths">The path of the public keys with their expected scriptPubKey</param>
 		/// <returns>This PSBT</returns>
-		public PSBT AddKeyPath(IHDKey masterKey, params Tuple<KeyPath, Script>[] paths)
+		public PSBT AddKeyPath(IHDKey masterKey, params Tuple<KeyPath, Script?>[] paths)
 		{
 			if (masterKey == null)
 				throw new ArgumentNullException(nameof(masterKey));
@@ -1043,7 +1231,7 @@ namespace NBitcoin
 		/// <param name="rootedKeyPath">The keypath to this public key</param>
 		/// <param name="scriptPubKey">A specific scriptPubKey this pubkey is involved with</param>
 		/// <returns>This PSBT</returns>
-		public PSBT AddKeyPath(PubKey pubkey, RootedKeyPath rootedKeyPath, Script scriptPubKey)
+		public PSBT AddKeyPath(PubKey pubkey, RootedKeyPath rootedKeyPath, Script? scriptPubKey)
 		{
 			if (pubkey == null)
 				throw new ArgumentNullException(nameof(pubkey));
@@ -1059,7 +1247,7 @@ namespace NBitcoin
 				var coin = o.GetCoin();
 				if (coin == null)
 					continue;
-				if ((scriptPubKey != null && coin.ScriptPubKey == scriptPubKey) ||
+				if ((scriptPubKey is not null && coin.ScriptPubKey == scriptPubKey) ||
 					((o.GetSignableCoin() ?? coin.TryToScriptCoin(pubkey)) is Coin c && txBuilder.IsCompatibleKeyFromScriptCode(pubkey, c.GetScriptCode())) ||
 					  txBuilder.IsCompatibleKeyFromScriptCode(pubkey, coin.ScriptPubKey))
 				{
@@ -1086,23 +1274,31 @@ namespace NBitcoin
 			if (IsAllFinalized())
 				return this;
 			accountKey = accountKey.AsHDKeyCache();
-			var accountKeyFP = accountKey.GetPublicKey().GetHDFingerPrint();
 			foreach (var o in HDKeysFor(accountKey).GroupBy(c => c.Coin))
 			{
 				if (o.Key is PSBTInput i && i.IsFinalized())
 					continue;
 				foreach (var keyPath in o)
 				{
-					o.Key.HDKeyPaths.Remove(keyPath.PubKey);
-					o.Key.HDKeyPaths.Add(keyPath.PubKey, newRoot.Derive(keyPath.RootedKeyPath.KeyPath));
+					if (keyPath.RootedKeyPath.MasterFingerprint != newRoot.MasterFingerprint)
+					{
+						if (keyPath.PubKey is PubKey ecdsa)
+						{
+							o.Key.HDKeyPaths.Remove(ecdsa);
+							o.Key.HDKeyPaths.Add(ecdsa, newRoot.Derive(keyPath.RootedKeyPath.KeyPath));
+						}
+					}
 				}
 			}
 			foreach (var xpub in GlobalXPubs.ToList())
 			{
-				if (xpub.Key.ExtPubKey.PubKey == accountKey.GetPublicKey())
+				if (xpub.Key.ExtPubKey.PubKey.Equals(accountKey.GetPublicKey()))
 				{
-					GlobalXPubs.Remove(xpub.Key);
-					GlobalXPubs.Add(xpub.Key, newRoot.Derive(xpub.Value.KeyPath));
+					if (xpub.Value.MasterFingerprint != newRoot.MasterFingerprint)
+					{
+						GlobalXPubs.Remove(xpub.Key);
+						GlobalXPubs.Add(xpub.Key, newRoot.Derive(xpub.Value.KeyPath));
+					}
 				}
 			}
 			return this;
@@ -1125,3 +1321,4 @@ namespace NBitcoin
 		}
 	}
 }
+#nullable disable

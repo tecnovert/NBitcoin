@@ -1,4 +1,6 @@
-﻿using NBitcoin.BouncyCastle.Math;
+﻿#if !HAS_SPAN
+using NBitcoin.BouncyCastle.Math;
+#endif
 using NBitcoin.Crypto;
 using NBitcoin.DataEncoders;
 using NBitcoin.JsonConverters;
@@ -50,6 +52,30 @@ namespace NBitcoin.Tests
 				Assert.Equal(50, RandomUtils.GetBytes(50).Length);
 			}
 		}
+
+		public class MyRandom : IRandom
+		{
+			private Random rnd = new Random(123456);
+			public void GetBytes(byte[] output) => rnd.NextBytes(output);
+#if HAS_SPAN
+			public void GetBytes(Span<byte> output) => rnd.NextBytes(output);
+#endif
+		}
+
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void CanDisableAdditionalEntropy()
+		{
+			RandomUtils.UseAdditionalEntropy = false;
+			RandomUtils.Random = new MyRandom();
+			var r1 = RandomUtils.GetUInt32();
+
+			RandomUtils.Random = new MyRandom();
+			var r2 = RandomUtils.GetUInt32();
+
+			Assert.Equal(r1, r2);
+		}
+
 		[Fact]
 		[Trait("Core", "Core")]
 		public void util_HexStr()
@@ -59,27 +85,25 @@ namespace NBitcoin.Tests
 	  "04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f");
 
 			AssertEx.Equal(
-				new HexEncoder()
-				{
-					Space = true
-				}.EncodeData(ParseHex_expected, 0, 5),
-				"04 67 8a fd b0");
+				new HexEncoder().EncodeData(ParseHex_expected, 0, 5),
+				"04678afdb0");
 
 			AssertEx.Equal(
-				new HexEncoder()
-				{
-					Space = true
-				}.EncodeData(ParseHex_expected, 0, 0),
+				new HexEncoder().EncodeData(ParseHex_expected, 0, 0),
 				"");
 
 			var ParseHex_vec = ParseHex_expected.Take(5).ToArray();
 
 			AssertEx.Equal(
-				new HexEncoder()
-				{
-					Space = true
-				}.EncodeData(ParseHex_vec),
-				"04 67 8a fd b0");
+				new HexEncoder().EncodeData(ParseHex_vec),
+				"04678afdb0");
+			var allHex = String.Join("", Enumerable.Range(0, 256).Select(v => v.ToString("x2")));
+			var decoded = new HexEncoder().DecodeData(allHex);
+			Assert.Equal(allHex, new HexEncoder().EncodeData(decoded));
+			for (int i = 0; i < 256; i++)
+			{
+				Assert.Equal(i, decoded[i]);
+			}
 		}
 
 		[Fact]
@@ -115,12 +139,12 @@ namespace NBitcoin.Tests
 				"m/0h",
 				"m/0h/1",
 				"m/0/1",
-				$"m/{uint.MaxValue}/1",
 				$"m/{0x80000000u - 1}h",
 				$"m/{0x80000000u - 1}"
 			}.ToList();
 			var invalid = new[]
 			{
+				$"m/{uint.MaxValue}/1",
 				$"m/{((long)uint.MaxValue) + 1}/1",
 				$"k/0/1",
 				$"h/1",
@@ -206,9 +230,9 @@ namespace NBitcoin.Tests
 			Assert.Equal("bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3", addressScript.Hash.GetAddress(addressScript.Network).ToString());
 			Assert.Equal("bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3", addressScript.ScriptPubKey.GetDestinationAddress(addressScript.Network).ToString());
 
-			//Example of the BIP		
+			//Example of the BIP
 			pubkey = new PubKey("0450863AD64A87AE8A2FE83C1AF1A8403CB53F53E486D8511DAD8A04887E5B23522CD470243453A299FA9E77237716103ABC11A1DF38855ED6F2EE187E9C582BA6");
-			Assert.Equal(new Script("OP_0 010966776006953D5567439E5E39F86A0D273BEE"), pubkey.GetSegwitAddress(Network.Main).ScriptPubKey);
+			Assert.Equal(new Script("OP_0 010966776006953D5567439E5E39F86A0D273BEE"), pubkey.GetAddress(ScriptPubKeyType.Segwit, Network.Main).ScriptPubKey);
 
 
 			//Test .ToNetwork()
@@ -260,6 +284,30 @@ namespace NBitcoin.Tests
 		//https://en.bitcoin.it/wiki/Difficulty
 		public void CanReadConvertTargetToDifficulty()
 		{
+#if NO_NATIVE_BIGNUM
+			var max = NBitcoin.Target.ToBigInteger(new uint256("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
+			Assert.True(max.CompareTo(BigInteger.Zero) > 0);
+			var maxExpected = new BigInteger(Encoders.Hex.DecodeData("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00").Reverse().ToArray());
+			Assert.Equal(maxExpected, max);
+			var maxminusone = NBitcoin.Target.ToBigInteger(new uint256("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
+			maxExpected = new BigInteger(Encoders.Hex.DecodeData("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f").Reverse().ToArray());
+			Assert.Equal(maxExpected, maxminusone);
+#else
+			var max = NBitcoin.Target.ToBigInteger(new uint256("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
+			Assert.True(max > System.Numerics.BigInteger.Zero);
+			Assert.Equal(new uint256("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"), NBitcoin.Target.ToUInt256(max));
+			var maxExpected = new System.Numerics.BigInteger(Encoders.Hex.DecodeData("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00"));
+			Assert.Equal(maxExpected, max);
+			var maxminusone = NBitcoin.Target.ToBigInteger(new uint256("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
+			maxExpected = new System.Numerics.BigInteger(Encoders.Hex.DecodeData("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"));
+			Assert.Equal(maxExpected, maxminusone);
+			Assert.Equal(new uint256("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"), NBitcoin.Target.ToUInt256(maxminusone));
+#endif
+			var limit = new Target(new uint256("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
+			Assert.Equal(0x1D00FFFFU, (uint)limit);
+			Assert.Equal("00000000ffff0000000000000000000000000000000000000000000000000000", limit.ToString());
+			var limit2 = new Target(new uint256("000000007fffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
+			Assert.Equal(0x1c7fffffU, (uint)limit2);
 			var packed = new Target(TestUtils.ParseHex("1b0404cb"));
 			var unpacked = new Target(uint256.Parse("00000000000404CB000000000000000000000000000000000000000000000000"));
 
@@ -267,20 +315,25 @@ namespace NBitcoin.Tests
 			Assert.Equal(packed, new Target(0x1b0404cb));
 
 			packed = new Target(TestUtils.ParseHex("1b8404cb"));
-			Assert.True(packed.ToBigInteger().CompareTo(BigInteger.Zero) < 0);
+#if NO_NATIVE_BIGNUM
+			Assert.True(packed.ToBigInteger().CompareTo(BigInteger.Zero) > 0);
+#else
+			Assert.True(packed > System.Numerics.BigInteger.Zero);
+#endif
 			Assert.Equal(packed, new Target(0x1b8404cb));
 
 			packed = new Target(TestUtils.ParseHex("1d00ffff"));
+			Assert.Equal(packed, limit);
 			Assert.Equal(1, packed.Difficulty);
 			Assert.Equal(Target.Difficulty1, packed);
 
 			packed = new Target(TestUtils.ParseHex("1b0404cb"));
 			Assert.Equal(16307.420938523983D, packed.Difficulty, "420938523983".Length);
 
-			Assert.Equal(packed, new Target((uint)0x1b0404cb));
+			Assert.Equal(packed, new Target(0x1b0404cb));
 			Assert.Equal((uint)packed, (uint)0x1b0404cb);
 
-			packed = new Target((uint)0x1b0404d1);
+			packed = new Target(0x1b0404d1);
 			Assert.Equal(16307.04943863739, packed.Difficulty, "420938523983".Length);
 
 			packed = new Target(0x1d00ffff);
@@ -377,7 +430,7 @@ namespace NBitcoin.Tests
 			long data = 5;
 			Assert.Equal(Money.Coins(5), data * Money.Coins(1.0m));
 			Assert.Equal(Money.Coins(5), Money.Coins(1.0m) * data);
-			Assert.Equal(500000000L, (long)Money.Coins(5).Satoshi);
+			Assert.Equal(500000000L, Money.Coins(5).Satoshi);
 			Assert.Equal(500000000U, (uint)Money.Coins(5).Satoshi);
 			Assert.Equal("5.00000000", Money.Coins(5).ToString());
 		}
@@ -624,6 +677,15 @@ namespace NBitcoin.Tests
 			Assert.Throws<OverflowException>(() => -1 * (Money)long.MinValue);
 		}
 
+
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void FeeRateCalculation()
+		{
+			Assert.Equal(Money.Satoshis(1L), new FeeRate(0.5m).GetFee(1));
+			Assert.Equal(Money.Satoshis(3L), new FeeRate(3m).GetFee(1));
+		}
+
 		[Fact]
 		[Trait("UnitTest", "UnitTest")]
 		public void FeeRateFormatting()
@@ -688,9 +750,9 @@ namespace NBitcoin.Tests
 			Assert.False(a.Equals(o));
 			Assert.True(b == bb);
 			Assert.True(b != aa);
-			Assert.True(b != (null as FeeRate));
-			Assert.True((null as FeeRate) == (null as FeeRate));
-			Assert.False((null as FeeRate) != (null as FeeRate));
+			Assert.True(b != null);
+			Assert.True(null == (null as FeeRate));
+			Assert.False(null != (null as FeeRate));
 			Assert.False(a.Equals(b));
 			Assert.True(aa == a);
 			Assert.True(bb == b);
@@ -712,7 +774,7 @@ namespace NBitcoin.Tests
 			Assert.True(!HexEncoder.IsWellFormed("00xx00"));
 			Assert.True(!HexEncoder.IsWellFormed("0x0000"));
 		}
-
+#if !HAS_SPAN
 		[Fact]
 		[Trait("UnitTest", "UnitTest")]
 		public void CanRoundTripBigIntegerToBytes()
@@ -724,6 +786,7 @@ namespace NBitcoin.Tests
 				Assert.Equal<BigInteger>(BigInteger.ValueOf(expected), actual);
 			}
 		}
+#endif
 
 		[Fact]
 		[Trait("UnitTest", "UnitTest")]
@@ -768,7 +831,7 @@ namespace NBitcoin.Tests
 			Assert.Equal(k.Derive(baseKeyPath.Derive(19U)).GetPublicKey(), result[19].GetPublicKey());
 			Assert.Equal(8 + 20, cache.Cached);
 		}
-
+#if !HAS_SPAN
 		[Fact]
 		[Trait("UnitTest", "UnitTest")]
 		public void CanConvertBigIntegerToBytes()
@@ -788,6 +851,28 @@ namespace NBitcoin.Tests
 			Assert.Equal(b, Utils.BytesToBigInteger(bbytes));
 			if (testByteSerialization)
 				Assert.True(Utils.BigIntegerToBytes(b).SequenceEqual(bbytes));
+		}
+#endif
+
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void CanConvertBigIntegerLongToBytes()
+		{
+			CanConvertBigIntegerLongToBytesCore(0, new byte[0]);
+			CanConvertBigIntegerLongToBytesCore(0, new byte[] { 0 }, false);
+			CanConvertBigIntegerLongToBytesCore(0, new byte[] { 0x80 }, false);
+			CanConvertBigIntegerLongToBytesCore(1, new byte[] { 1 });
+			CanConvertBigIntegerLongToBytesCore(-1, new byte[] { 0x81 });
+			CanConvertBigIntegerLongToBytesCore(-128, new byte[] { 0x80, 0x80 });
+			CanConvertBigIntegerLongToBytesCore(-129, new byte[] { 0x81, 0x80 });
+			CanConvertBigIntegerLongToBytesCore(-256, new byte[] { 0x00, 0x81 });
+		}
+
+		private void CanConvertBigIntegerLongToBytesCore(long b, byte[] bbytes, bool testByteSerialization = true)
+		{
+			// Assert.Equal(b, Utils.BytesToBigInteger(bbytes)); we don't care about this test
+			if (testByteSerialization)
+				Assert.True(Op.GetPushOp(b).PushData.SequenceEqual(bbytes));
 		}
 
 		[Fact]
@@ -848,12 +933,15 @@ namespace NBitcoin.Tests
 			foreach (var plainText in msgs)
 			{
 				var cipherText1 = key.PubKey.Encrypt(plainText);
-				var cipherText2 = key.PubKey.Encrypt(plainText);
+				var cipherText2 = key.PubKey.Encrypt(Encoders.ASCII.EncodeData(plainText));
 				var text1 = key.Decrypt(cipherText1);
 				var text2 = key.Decrypt(cipherText2);
 				Assert.True(Utils.ArrayEqual(text1, plainText));
-				Assert.True(Utils.ArrayEqual(text2, plainText));
-				Assert.True(!Utils.ArrayEqual(cipherText1, cipherText2));
+				Assert.Equal(text2, Encoders.ASCII.EncodeData(plainText));
+
+				// Encrypt twice, should not give twice same cypher
+				var cipherText3 = key.PubKey.Encrypt(plainText);
+				Assert.True(!Utils.ArrayEqual(cipherText1, cipherText3));
 			}
 
 			// Electrum compatibility
@@ -866,12 +954,12 @@ namespace NBitcoin.Tests
 		{
 			var bytes = Encoding.UTF8.GetBytes(password);
 #pragma warning disable CS0618 // Type or member is obsolete
-#if USEBC || WINDOWS_UWP || NETSTANDARD1X
+#if NO_NATIVE_HMACSHA512
 			var mac = new NBitcoin.BouncyCastle.Crypto.Macs.HMac(new NBitcoin.BouncyCastle.Crypto.Digests.Sha512Digest());
 			mac.Init(new NBitcoin.BouncyCastle.Crypto.Parameters.KeyParameter(bytes));
 			var secret = Pbkdf2.ComputeDerivedKey(mac, new byte[0], 1024, 32);
 #else
-			var secret = Pbkdf2.ComputeDerivedKey(new HMACSHA512(bytes), new byte[0], 1024, 32);
+			var secret = NBitcoin.Crypto.Pbkdf2.ComputeDerivedKey(new System.Security.Cryptography.HMACSHA512(bytes), new byte[0], 1024, 32);
 #endif
 #pragma warning restore CS0618
 			return new Key(secret);

@@ -355,11 +355,8 @@ namespace NBitcoin.Altcoins
 
 		public class DashBlock : Block
 		{
-#pragma warning disable CS0612 // Type or member is obsolete
 			public DashBlock(DashBlockHeader h) : base(h)
-#pragma warning restore CS0612 // Type or member is obsolete
 			{
-
 			}
 			public override ConsensusFactory GetConsensusFactory()
 			{
@@ -377,13 +374,6 @@ namespace NBitcoin.Altcoins
 		protected override void PostInit()
 		{
 			RegisterDefaultCookiePath("DashCore");
-		}
-
-		static uint256 GetPoWHash(BlockHeader header)
-		{
-			var headerBytes = header.ToBytes();
-			var h = SCrypt.ComputeDerivedKey(headerBytes, headerBytes, 1024, 1, 1, null, 32);
-			return new uint256(h);
 		}
 
 		protected override NetworkBuilder CreateMainnet()
@@ -415,10 +405,11 @@ namespace NBitcoin.Altcoins
 			.SetBase58Bytes(Base58Type.EXT_SECRET_KEY, new byte[] { 0x04, 0x88, 0xAD, 0xE4 })
 			.SetBech32(Bech32Type.WITNESS_PUBKEY_ADDRESS, Encoders.Bech32("dash"))
 			.SetBech32(Bech32Type.WITNESS_SCRIPT_ADDRESS, Encoders.Bech32("dash"))
+			.SetUriScheme("dash")
 			.SetMagic(0xBD6B0CBF)
 			.SetPort(9999)
 			.SetRPCPort(9998)
-			.SetMaxP2PVersion(70213)
+			.SetMaxP2PVersion(70223)
 			.SetName("dash-main")
 			.AddAlias("dash-mainnet")
 			.AddDNSSeeds(new[]
@@ -465,9 +456,10 @@ namespace NBitcoin.Altcoins
 			.SetMagic(0xFFCAE2CE)
 			.SetPort(19999)
 			.SetRPCPort(19998)
-			.SetMaxP2PVersion(70213)
+			.SetMaxP2PVersion(70223)
 		   .SetName("dash-test")
 		   .AddAlias("dash-testnet")
+		   .SetUriScheme("dash")
 		   .AddDNSSeeds(new[]
 		   {
 				new DNSSeedData("dashdot.io",  "testnet-seed.dashdot.io"),
@@ -500,6 +492,7 @@ namespace NBitcoin.Altcoins
 				ConsensusFactory = DashConsensusFactory.Instance,
 				SupportSegwit = false
 			})
+			.SetMaxP2PVersion(70223)
 			.SetBase58Bytes(Base58Type.PUBKEY_ADDRESS, new byte[] { 140 })
 			.SetBase58Bytes(Base58Type.SCRIPT_ADDRESS, new byte[] { 19 })
 			.SetBase58Bytes(Base58Type.SECRET_KEY, new byte[] { 239 })
@@ -510,9 +503,9 @@ namespace NBitcoin.Altcoins
 			.SetMagic(0xDCB7C1FC)
 			.SetPort(19994)
 			.SetRPCPort(19993)
-			.SetMaxP2PVersion(70213)
 			.SetName("dash-reg")
 			.AddAlias("dash-regtest")
+			.SetUriScheme("dash")
 			.AddDNSSeeds(new DNSSeedData[0])
 			.AddSeeds(new NetworkAddress[0])
 			.SetGenesis("010000000000000000000000000000000000000000000000000000000000000000000000c762a6567f3cc092f0684bb62b7e00a84890b990f07cc71a6bb58d64b98e02e0b9968054ffff7f20ffba10000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff6204ffff001d01044c5957697265642030392f4a616e2f3230313420546865204772616e64204578706572696d656e7420476f6573204c6976653a204f76657273746f636b2e636f6d204973204e6f7720416363657074696e6720426974636f696e73ffffffff0100f2052a010000004341040184710fa689ad5023690c80f3a49c8f13f8d45b8c857fbcbc8bc4a8e4d3eb4b10f4d4604fa08dce601aaf0f470216fe1b51850b4acf21b179c45070ac7b03a9ac00000000");

@@ -144,9 +144,9 @@ namespace NBitcoin
 		/// <returns>The filter header.</returns>
 		public uint256 GetHeader(uint256 previousHeader)
 		{
-			var curFilterHashBytes = Hashes.Hash256(ToBytes()).ToBytes();
+			var curFilterHashBytes = Hashes.DoubleSHA256(ToBytes()).ToBytes();
 			var prvFilterHashBytes = previousHeader.ToBytes();
-			return Hashes.Hash256(curFilterHashBytes.Concat(prvFilterHashBytes));
+			return Hashes.DoubleSHA256(curFilterHashBytes.Concat(prvFilterHashBytes));
 		}
 
 		/// <summary>
@@ -210,43 +210,30 @@ namespace NBitcoin
 			if (key == null)
 				throw new ArgumentNullException(nameof(key));
 
-			if (N == 0)
-				return false;
-
 			var hs = ConstructHashedSet(P, N, M, key, data, dataCount);
-
-			var lastValue1 = 0UL;
-			var lastValue2 = hs[0];
-			var i = 1;
 
 			var bitStream = new BitStream(Data);
 			var sr = new GRCodedStreamReader(bitStream, P, 0);
 
-			while (lastValue1 != lastValue2)
+			while(sr.TryRead(out var val))
 			{
-				if (lastValue1 > lastValue2)
+				var dataIndex = 0;
+				while(true)
 				{
-					if (i < hs.Length)
-					{
-						lastValue2 = hs[i];
-						i++;
-					}
-					else
-					{
+					if (dataIndex == dataCount)
 						return false;
-					}
-				}
-				else if (lastValue2 > lastValue1)
-				{
 
-					if (sr.TryRead(out var val))
-						lastValue1 = val;
-					else
-						return false;
+					if (hs[dataIndex] == val)
+						return true;
+
+					if (hs[dataIndex] > val)
+						break;
+
+					dataIndex++;
 				}
 			}
 
-			return true;
+			return false;
 		}
 
 		/// <summary>

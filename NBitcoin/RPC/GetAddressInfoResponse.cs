@@ -1,6 +1,7 @@
 #if !NOJSONNET
 using System;
 using System.Collections.Generic;
+using NBitcoin.Scripting;
 using Newtonsoft.Json.Linq;
 
 namespace NBitcoin.RPC
@@ -9,7 +10,10 @@ namespace NBitcoin.RPC
 	{
 		public bool IsMine { get; private set; }
 		public bool? Solvable { get; private set; }
-		public ScanTxoutDescriptor Desc { get; private set; }
+
+# nullable enable
+		public OutputDescriptor? Descriptor { get; private set; }
+#nullable disable
 
 		// present only in p2sh-nested case
 		public GetAddressInfoScriptInfoResponse Embedded { get; private set; }
@@ -20,7 +24,6 @@ namespace NBitcoin.RPC
 		public KeyPath HDKeyPath { get; private set; }
 		public uint160 HDSeedID { get; private set; }
 		public uint160 HDMasterKeyID { get; private set; }
-		public List<Dictionary<string, string>> Labels { get; private set; } = new List<Dictionary<string, string>>();
 
 		public bool? IsCompressed { get; private set; }
 
@@ -33,7 +36,9 @@ namespace NBitcoin.RPC
 			SetSubInfo(this, raw, network);
 			IsMine = raw.Property("ismine").Value.Value<bool>();
 			Solvable = raw.Property("solvable")?.Value.Value<bool>();
-			Desc = raw.Property("desc") == null ? null : new ScanTxoutDescriptor(raw.Property("desc").Value.Value<string>());
+			Descriptor = raw.Property("desc") == null
+				? null
+				: OutputDescriptor.Parse(raw.Property("desc").Value.Value<string>(), network);
 			IsWatchOnly = raw.Property("iswatchonly").Value.Value<bool>();
 			IsScript = raw.Property("isscript").Value.Value<bool>();
 			IsWitness = raw.Property("iswitness").Value.Value<bool>();
@@ -54,16 +59,6 @@ namespace NBitcoin.RPC
 			HDKeyPath = raw.Property("hdkeypath") == null ? null : KeyPath.Parse(raw.Property("hdkeypath").Value.Value<string>());
 			HDSeedID = raw.Property("hdseedid") == null ? null : uint160.Parse(raw.Property("hdseedid").Value.Value<string>());
 			HDMasterKeyID = raw.Property("hdmasterkeyid") == null ? null : uint160.Parse(raw.Property("hdmasterkeyid").Value.Value<string>());
-			var jlabels = raw.Property("labels");
-			if (jlabels != null)
-			{
-				var labelObjects = jlabels.Value.Value<JArray>();
-				foreach (var jObj in labelObjects)
-				{
-					Labels.Add(((JObject)jObj).ToObject<Dictionary<string, string>>());
-				}
-			}
-
 			return this;
 		}
 

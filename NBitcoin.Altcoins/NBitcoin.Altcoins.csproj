@@ -3,27 +3,32 @@
 		<Company>Metaco SA</Company>
 		<Copyright>Copyright © Metaco SA 2017</Copyright>
 		<Description>The C# Bitcoin Library</Description>
+		<LangVersion>9.0</LangVersion>
     <PackageIcon>icon.png</PackageIcon>
 		<PackageId>tecnovert.Particl.NBitcoin.Altcoins</PackageId>
-		<PackageTags>bitcoin,altcoins,bcash,bgold,bitcore,dash,dogecoin,dystem,feathercoin,groestlcoin,litecoin,monacoin,polis,ufo,viacoin,zclassic,liquid,particl</PackageTags>
-		<PackageProjectUrl>https://github.com/spazzymoto/NBitcoin</PackageProjectUrl>
+		<PackageTags>bitcoin,altcoins,bcash,bgold,bitcore,dash,verge,terracoin,dogecoin,dystem,feathercoin,groestlcoin,litecoin,monacoin,polis,ufo,qtum,viacoin,zclassic,liquid,argoneum,monetaryunit,lbrycredits,xds,althash,neblio,opticalbitcoin,particl</PackageTags>
+		<PackageProjectUrl>https://github.com/tecnovert/NBitcoin</PackageProjectUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-		<RepositoryUrl>https://github.com/spazzymoto/NBitcoin</RepositoryUrl>
+		<RepositoryUrl>https://github.com/tecnovert/NBitcoin</RepositoryUrl>
 		<RepositoryType>git</RepositoryType>
 	</PropertyGroup>
 	<PropertyGroup>
-		<Version Condition=" '$(Version)' == '' ">2.0.3</Version>
-		<TargetFrameworks>net452;netstandard1.3;netstandard2.0</TargetFrameworks>
+		<TargetFrameworks>net6.0;net472;netstandard1.3;netstandard2.0;netstandard2.1</TargetFrameworks>
 		<TargetFrameworks Condition="'$(BuildingInsideVisualStudio)' == 'true'">netstandard2.1</TargetFrameworks>
     <TargetFrameworks Condition="'$(TargetFrameworkOverride)' != ''">$(TargetFrameworkOverride)</TargetFrameworks>
 		<NoWarn>1591;1573;1572;1584;1570;3021</NoWarn>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <Version>3.0.18.1</Version>
 	</PropertyGroup>
 	<ItemGroup>
 		<ProjectReference Include="..\NBitcoin\NBitcoin.csproj" />
 	</ItemGroup>
+  <PropertyGroup Condition=" '$(TargetFramework)' == 'netstandard2.1' Or '$(TargetFramework)' == 'net6.0'">
+    <DefineConstants>$(DefineConstants);HAS_SPAN</DefineConstants>
+    <RemoveBC>true</RemoveBC>
+  </PropertyGroup>
   <ItemGroup Condition=" '$(Configuration)' == 'Release' ">
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.0.0-beta-63127-02" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.0.0" PrivateAssets="All" />
   </ItemGroup>
 	<ItemGroup>
     <None Include="..\icon.png" Pack="true" PackagePath="\" />

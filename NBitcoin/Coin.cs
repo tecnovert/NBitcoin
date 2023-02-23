@@ -1,5 +1,4 @@
 ﻿using NBitcoin.OpenAsset;
-using NBitcoin.Stealth;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -17,17 +16,20 @@ namespace NBitcoin
 			get;
 		}
 	}
-	public interface ICoin
+	public interface ICoinable
 	{
-		IMoney Amount
-		{
-			get;
-		}
 		OutPoint Outpoint
 		{
 			get;
 		}
 		TxOut TxOut
+		{
+			get;
+		}
+	}
+	public interface ICoin : ICoinable
+	{
+		IMoney Amount
 		{
 			get;
 		}
@@ -44,6 +46,10 @@ namespace NBitcoin
 			get;
 		}
 		HashVersion GetHashVersion();
+		bool IsMalleable
+		{
+			get;
+		}
 	}
 
 	public class IssuanceCoin : IColoredCoin
@@ -62,7 +68,7 @@ namespace NBitcoin
 			Bearer = new Coin(outpoint, txout);
 		}
 
-
+		public bool IsMalleable => Bearer.IsMalleable;
 		public AssetId AssetId
 		{
 			get
@@ -160,7 +166,7 @@ namespace NBitcoin
 			}
 		}
 
-		OutPoint ICoin.Outpoint
+		OutPoint ICoinable.Outpoint
 		{
 			get
 			{
@@ -168,7 +174,7 @@ namespace NBitcoin
 			}
 		}
 
-		TxOut ICoin.TxOut
+		TxOut ICoinable.TxOut
 		{
 			get
 			{
@@ -235,24 +241,11 @@ namespace NBitcoin
 				return Amount.Id;
 			}
 		}
-
+		public bool IsMalleable => Bearer.IsMalleable;
 		public AssetMoney Amount
 		{
 			get;
 			set;
-		}
-
-		[Obsolete("Use Amount instead")]
-		public AssetMoney Asset
-		{
-			get
-			{
-				return Amount;
-			}
-			set
-			{
-				Amount = value;
-			}
 		}
 
 		public Coin Bearer
@@ -350,7 +343,7 @@ namespace NBitcoin
 			}
 		}
 
-		OutPoint ICoin.Outpoint
+		OutPoint ICoinable.Outpoint
 		{
 			get
 			{
@@ -358,7 +351,7 @@ namespace NBitcoin
 			}
 		}
 
-		TxOut ICoin.TxOut
+		TxOut ICoinable.TxOut
 		{
 			get
 			{
@@ -444,7 +437,8 @@ namespace NBitcoin
 				return key.AsKeyId().ScriptPubKey;
 			return ScriptPubKey;
 		}
-
+		public bool IsMalleable => !(ScriptPubKey.IsScriptType(ScriptType.Taproot) ||
+								     GetHashVersion() == HashVersion.WitnessV0);
 		public virtual bool CanGetScriptCode
 		{
 			get
@@ -455,8 +449,10 @@ namespace NBitcoin
 
 		public virtual HashVersion GetHashVersion()
 		{
+			if (ScriptPubKey.IsScriptType(ScriptType.Taproot))
+				return HashVersion.Taproot;
 			if (PayToWitTemplate.Instance.CheckScriptPubKey(ScriptPubKey))
-				return HashVersion.Witness;
+				return HashVersion.WitnessV0;
 			return HashVersion.Original;
 		}
 
@@ -572,7 +568,7 @@ namespace NBitcoin
 			}
 		}
 
-		OutPoint ICoin.Outpoint
+		OutPoint ICoinable.Outpoint
 		{
 			get
 			{
@@ -580,7 +576,7 @@ namespace NBitcoin
 			}
 		}
 
-		TxOut ICoin.TxOut
+		TxOut ICoinable.TxOut
 		{
 			get
 			{
@@ -597,6 +593,19 @@ namespace NBitcoin
 		P2SH,
 		WitnessV0
 	}
+
+#nullable enable
+	public class CoinOptions
+	{
+		public CoinOptions()
+		{
+			Sequence = null;
+		}
+
+		public Sequence? Sequence { get; set; }
+		public KeyPair? KeyPair { get; set; }
+	}
+#nullable restore
 
 
 	/// <summary>
@@ -651,6 +660,10 @@ namespace NBitcoin
 		}
 
 
+		/// <summary>
+		/// Get the P2SH redeem script
+		/// </summary>
+		/// <returns>The P2SH redeem script or null if this coin is not P2SH.</returns>
 		public Script GetP2SHRedeem()
 		{
 			if (!IsP2SH)
@@ -709,6 +722,7 @@ namespace NBitcoin
 				if (expectedDestination.ScriptPubKey != redeem.WitHash.ScriptPubKey)
 				{
 					error = "The redeem provided does not match the scriptPubKey of the coin";
+					return false;
 				}
 			}
 			else
@@ -765,7 +779,7 @@ namespace NBitcoin
 			var isWitness = PayToWitTemplate.Instance.CheckScriptPubKey(ScriptPubKey) ||
 							PayToWitTemplate.Instance.CheckScriptPubKey(Redeem) ||
 							RedeemType == NBitcoin.RedeemType.WitnessV0;
-			return isWitness ? HashVersion.Witness : HashVersion.Original;
+			return isWitness ? HashVersion.WitnessV0 : HashVersion.Original;
 		}
 
 		/// <summary>
@@ -773,104 +787,13 @@ namespace NBitcoin
 		/// </summary>
 		/// <param name="scriptPubKey">The scriptPubKey</param>
 		/// <returns>The hash of the scriptPubkey</returns>
-		public static TxDestination GetRedeemHash(Script scriptPubKey)
+		public static IAddressableDestination GetRedeemHash(Script scriptPubKey)
 		{
 			if (scriptPubKey == null)
 				throw new ArgumentNullException(nameof(scriptPubKey));
-			return PayToScriptHashTemplate.Instance.ExtractScriptPubKeyParameters(scriptPubKey) as TxDestination
+			return PayToScriptHashTemplate.Instance.ExtractScriptPubKeyParameters(scriptPubKey) as IAddressableDestination
 					??
 					PayToWitScriptHashTemplate.Instance.ExtractScriptPubKeyParameters(scriptPubKey);
-		}
-	}
-
-	public class StealthCoin : Coin
-	{
-		public StealthCoin()
-		{
-		}
-		public StealthCoin(OutPoint outpoint, TxOut txOut, Script redeem, StealthMetadata stealthMetadata, BitcoinStealthAddress address)
-			: base(outpoint, txOut)
-		{
-			StealthMetadata = stealthMetadata;
-			Address = address;
-			Redeem = redeem;
-		}
-		public StealthMetadata StealthMetadata
-		{
-			get;
-			set;
-		}
-
-		public BitcoinStealthAddress Address
-		{
-			get;
-			set;
-		}
-
-		public Script Redeem
-		{
-			get;
-			set;
-		}
-
-		public override Script GetScriptCode()
-		{
-			if (_OverrideScriptCode != null)
-				return _OverrideScriptCode;
-			if (Redeem == null)
-				return base.GetScriptCode();
-			else
-				return new ScriptCoin(this, Redeem).GetScriptCode();
-		}
-
-		public override HashVersion GetHashVersion()
-		{
-			if (Redeem == null)
-				return base.GetHashVersion();
-			else
-				return new ScriptCoin(this, Redeem).GetHashVersion();
-		}
-
-		/// <summary>
-		/// Scan the Transaction for StealthCoin given address and scan key
-		/// </summary>
-		/// <param name="tx">The transaction to scan</param>
-		/// <param name="address">The stealth address</param>
-		/// <param name="scan">The scan private key</param>
-		/// <returns></returns>
-		public static StealthCoin Find(Transaction tx, BitcoinStealthAddress address, Key scan)
-		{
-			var payment = address.GetPayments(tx, scan).FirstOrDefault();
-			if (payment == null)
-				return null;
-			var txId = tx.GetHash();
-			var txout = tx.Outputs.First(o => o.ScriptPubKey == payment.ScriptPubKey);
-			return new StealthCoin(new OutPoint(txId, tx.Outputs.IndexOf(txout)), txout, payment.Redeem, payment.Metadata, address);
-		}
-
-		public StealthPayment GetPayment()
-		{
-			return new StealthPayment(TxOut.ScriptPubKey, Redeem, StealthMetadata);
-		}
-
-		public PubKey[] Uncover(PubKey[] spendPubKeys, Key scanKey)
-		{
-			var pubKeys = new PubKey[spendPubKeys.Length];
-			for (int i = 0; i < pubKeys.Length; i++)
-			{
-				pubKeys[i] = spendPubKeys[i].UncoverReceiver(scanKey, StealthMetadata.EphemKey);
-			}
-			return pubKeys;
-		}
-
-		public Key[] Uncover(Key[] spendKeys, Key scanKey)
-		{
-			var keys = new Key[spendKeys.Length];
-			for (int i = 0; i < keys.Length; i++)
-			{
-				keys[i] = spendKeys[i].Uncover(scanKey, StealthMetadata.EphemKey);
-			}
-			return keys;
 		}
 	}
 }

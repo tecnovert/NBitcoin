@@ -197,7 +197,7 @@ namespace NBitcoin.Tests
 			Assert.Equal("44'", keyPath.Parent.ToString());
 			Assert.Equal("", keyPath.Parent.Parent.ToString());
 			Assert.Null(keyPath.Parent.Parent.Parent);
-			Assert.Null(keyPath.Parent.Parent.Increment());
+			Assert.Throws<InvalidOperationException>(() => keyPath.Parent.Parent.Increment());
 			Assert.Equal(key.Derive(keyPath).ToString(Network.Main), key.Derive(44, true).Derive(1, false).ToString(Network.Main));
 
 			Assert.True(key.Derive(44, true).IsHardened);
@@ -248,8 +248,8 @@ namespace NBitcoin.Tests
 		{
 			var key = new ExtKey();
 			var pubkey = key.Neuter();
-			Assert.True(ExtKey.Parse(key.ToString(Network.Main), Network.Main).ToString(Network.Main) == key.ToString(Network.Main));
-			Assert.True(ExtPubKey.Parse(pubkey.ToString(Network.Main), Network.Main).ToString(Network.Main) == pubkey.ToString(Network.Main));
+			Assert.Equal(ExtKey.Parse(key.ToString(Network.Main), Network.Main).ToString(Network.Main), key.ToString(Network.Main));
+			Assert.Equal(ExtPubKey.Parse(pubkey.ToString(Network.Main), Network.Main).ToString(Network.Main), pubkey.ToString(Network.Main));
 		}
 
 		[Fact]
@@ -292,7 +292,7 @@ namespace NBitcoin.Tests
 		private void RunTest(TestVector test)
 		{
 			var seed = TestUtils.ParseHex(test.strHexMaster);
-			ExtKey key = new ExtKey(seed);
+			ExtKey key = ExtKey.CreateFromSeed(seed);
 			ExtPubKey pubkey = key.Neuter();
 			foreach (TestDerivation derive in test.vDerive)
 			{
@@ -320,6 +320,25 @@ namespace NBitcoin.Tests
 				key = keyNew;
 				pubkey = pubkeyNew;
 			}
+		}
+
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void CanHandleEmptyKeyPath()
+		{
+			var rKeyPath = RootedKeyPath.Parse("01234567");
+			Assert.Equal(rKeyPath.KeyPath, KeyPath.Empty);
+			Assert.Equal("", KeyPath.Empty.ToString());
+			Assert.Equal(new byte[0], KeyPath.Empty.ToBytes());
+			Assert.Equal("01234567", rKeyPath.ToStringWithEmptyKeyPathAware());
+		}
+
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void KeyPathShouldNotParseBIP32Overflow()
+		{
+			Assert.Equal(0x80000000U, uint.Parse("2147483648"));
+			Assert.Throws<FormatException>(() => KeyPath.Parse("/2147483648"));
 		}
 	}
 }

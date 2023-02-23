@@ -6,11 +6,6 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using NBitcoin.Crypto;
-#if !WINDOWS_UWP && !USEBC
-using System.Security.Cryptography;
-#endif
-using NBitcoin.BouncyCastle.Security;
-using NBitcoin.BouncyCastle.Crypto.Parameters;
 
 namespace NBitcoin
 {
@@ -29,11 +24,10 @@ namespace NBitcoin
 			if (mnemonic == null)
 				throw new ArgumentNullException(nameof(mnemonic));
 			_Mnemonic = mnemonic.Trim();
-
 			if (wordlist == null)
 				wordlist = Wordlist.AutoDetect(mnemonic) ?? Wordlist.English;
-
-			var words = mnemonic.Split(new char[] { ' ', '　' }, StringSplitOptions.RemoveEmptyEntries);
+			var words = mnemonic.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+			_Mnemonic = string.Join(wordlist.Space.ToString(), words);
 			//if the sentence is not at least 12 characters or cleanly divisible by 3, it is bad!
 			if (!CorrectWordCount(words.Length))
 			{
@@ -58,7 +52,7 @@ namespace NBitcoin
 
 			var i = Array.IndexOf(entArray, entropy.Length * 8);
 			if (i == -1)
-				throw new ArgumentException("The length for entropy should be : " + String.Join(",", entArray), "entropy");
+				throw new ArgumentException("The length for entropy should be " + String.Join(",", entArray) + " bits", "entropy");
 
 			int cs = csArray[i];
 			byte[] checksum = Hashes.SHA256(entropy);
@@ -120,32 +114,6 @@ namespace NBitcoin
 			return msArray.Any(_ => _ == ms);
 		}
 
-
-		// FIXME: this method is not used. Shouldn't we delete it?
-		private int ToInt(BitArray bits)
-		{
-			if (bits.Length != 11)
-			{
-				throw new InvalidOperationException("should never happen, bug in nbitcoin");
-			}
-
-			int number = 0;
-			int base2Divide = 1024; //it's all downhill from here...literally we halve this for each bit we move to.
-
-			//literally picture this loop as going from the most significant bit across to the least in the 11 bits, dividing by 2 for each bit as per binary/base 2
-			foreach (bool b in bits)
-			{
-				if (b)
-				{
-					number = number + base2Divide;
-				}
-
-				base2Divide = base2Divide / 2;
-			}
-
-			return number;
-		}
-
 		private readonly Wordlist _WordList;
 		public Wordlist WordList
 		{
@@ -178,13 +146,15 @@ namespace NBitcoin
 			passphrase = passphrase ?? "";
 			var salt = Concat(NoBOMUTF8.GetBytes("mnemonic"), Normalize(passphrase));
 			var bytes = Normalize(_Mnemonic);
-
-#if USEBC || WINDOWS_UWP || NETSTANDARD1X
+#if NO_NATIVE_HMACSHA512
 			var mac = new NBitcoin.BouncyCastle.Crypto.Macs.HMac(new NBitcoin.BouncyCastle.Crypto.Digests.Sha512Digest());
-			mac.Init(new KeyParameter(bytes));
+			mac.Init(new NBitcoin.BouncyCastle.Crypto.Parameters.KeyParameter(bytes));
 			return Pbkdf2.ComputeDerivedKey(mac, salt, 2048, 64);
+#elif NO_NATIVE_RFC2898_HMACSHA512
+			return NBitcoin.Crypto.Pbkdf2.ComputeDerivedKey(new System.Security.Cryptography.HMACSHA512(bytes), salt, 2048, 64);
 #else
-			return Pbkdf2.ComputeDerivedKey(new HMACSHA512(bytes), salt, 2048, 64);
+			using System.Security.Cryptography.Rfc2898DeriveBytes derive = new System.Security.Cryptography.Rfc2898DeriveBytes(bytes, salt, 2048, System.Security.Cryptography.HashAlgorithmName.SHA512);
+			return derive.GetBytes(64);
 #endif
 
 		}
@@ -237,7 +207,16 @@ namespace NBitcoin
 
 		public ExtKey DeriveExtKey(string passphrase = null)
 		{
-			return new ExtKey(DeriveSeed(passphrase));
+#if HAS_SPAN
+			var arrayspan = DeriveSeed(passphrase).AsSpan();
+			var k = ExtKey.CreateFromSeed(arrayspan);
+			arrayspan.Clear();
+#else
+			var array = DeriveSeed(passphrase);
+			var k = ExtKey.CreateFromSeed(array);
+			Array.Clear(array, 0, array.Length);
+#endif
+			return k;
 		}
 
 		static Byte[] Concat(Byte[] source1, Byte[] source2)

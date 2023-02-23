@@ -43,66 +43,84 @@ namespace NBitcoin.Tests
 		[Trait("UnitTest", "UnitTest")]
 		public static void ShouldCalculateBalanceOfHDKey()
 		{
-			var aliceMaster = new ExtKey();
-			var bobMaster = new ExtKey();
+			foreach (var network in new[] { Network.Main, Altcoins.BGold.Instance.Mainnet })
+			{
+				var aliceMaster = new ExtKey();
+				var bobMaster = new ExtKey();
 
-			var alice = aliceMaster.Derive(new KeyPath("1/2/3"));
-			var bob = bobMaster.Derive(new KeyPath("4/5/6"));
+				var alice = aliceMaster.Derive(new KeyPath("1/2/3"));
+				var bob = bobMaster.Derive(new KeyPath("4/5/6"));
 
-			var funding = Network.Main.CreateTransaction();
-			funding.Outputs.Add(Money.Coins(1.0m), alice);
-			funding.Outputs.Add(Money.Coins(1.5m), bob);
+				var funding = network.CreateTransaction();
+				funding.Outputs.Add(Money.Coins(1.0m), alice);
+				funding.Outputs.Add(Money.Coins(1.5m), bob);
 
-			var coins = funding.Outputs.AsCoins().ToArray();
-			var aliceCoin = coins[0];
-			var bobCoin = coins[1];
+				var coins = funding.Outputs.AsCoins().ToArray();
+				var aliceCoin = coins[0];
+				var bobCoin = coins[1];
 
-			TransactionBuilder builder = Network.Main.CreateTransactionBuilder();
-			builder.SetGroupName("Alice");
-			builder.AddCoins(aliceCoin);
-			builder.AddKeys(alice);
-			builder.Send(new Key(), Money.Coins(0.2m));
-			builder.Send(new Key(), Money.Coins(0.1m));
-			builder.Send(bob, Money.Coins(0.123m));
-			builder.SetChange(alice);
+				TransactionBuilder builder = network.CreateTransactionBuilder();
+				builder.SetGroupName("Alice");
+				builder.AddCoins(aliceCoin);
+				builder.AddKeys(alice);
+				builder.Send(new Key(), Money.Coins(0.2m));
+				builder.Send(new Key(), Money.Coins(0.1m));
+				builder.Send(bob, Money.Coins(0.123m));
+				builder.SetChange(alice);
 
-			builder.Then();
-			builder.SetGroupName("Bob");
-			builder.AddCoins(bobCoin);
-			builder.AddKeys(bob);
-			builder.Send(new Key(), Money.Coins(0.25m));
-			builder.Send(new Key(), Money.Coins(0.01m));
-			builder.SetChange(bob);
-			builder.SendFees(Money.Coins(0.001m));
+				builder.Then();
+				builder.SetGroupName("Bob");
+				builder.AddCoins(bobCoin);
+				builder.AddKeys(bob);
+				builder.Send(new Key(), Money.Coins(0.25m));
+				builder.Send(new Key(), Money.Coins(0.01m));
+				builder.SetChange(bob);
+				builder.SendFees(Money.Coins(0.001m));
 
-			var psbt = builder.BuildPSBT(false);
-			psbt.AddKeyPath(aliceMaster, new KeyPath("1/2/3"));
-			psbt.AddKeyPath(bobMaster, new KeyPath("4/5/6"));
+				var psbt = builder.BuildPSBT(false);
+				psbt.AddKeyPath(aliceMaster, new KeyPath("1/2/3"));
+				psbt.AddKeyPath(bobMaster, new KeyPath("4/5/6"));
 
-			var actualBalance = psbt.GetBalance(ScriptPubKeyType.Legacy, aliceMaster);
-			var expectedChange = aliceCoin.Amount - (Money.Coins(0.2m) + Money.Coins(0.1m) + Money.Coins(0.123m));
-			var expectedBalance = -aliceCoin.Amount + expectedChange;
-			Assert.Equal(expectedBalance, actualBalance);
+				var actualBalance = psbt.GetBalance(ScriptPubKeyType.Legacy, aliceMaster);
+				var expectedChange = aliceCoin.Amount - (Money.Coins(0.2m) + Money.Coins(0.1m) + Money.Coins(0.123m));
+				var expectedBalance = -aliceCoin.Amount + expectedChange;
+				Assert.Equal(expectedBalance, actualBalance);
 
-			actualBalance = psbt.GetBalance(ScriptPubKeyType.Legacy, bobMaster);
-			expectedChange = bobCoin.Amount - (Money.Coins(0.25m) + Money.Coins(0.01m) + Money.Coins(0.001m)) + Money.Coins(0.123m);
-			expectedBalance = -bobCoin.Amount + expectedChange;
-			Assert.Equal(expectedBalance, actualBalance);
+				actualBalance = psbt.GetBalance(ScriptPubKeyType.Legacy, bobMaster);
+				expectedChange = bobCoin.Amount - (Money.Coins(0.25m) + Money.Coins(0.01m) + Money.Coins(0.001m)) + Money.Coins(0.123m);
+				expectedBalance = -bobCoin.Amount + expectedChange;
+				Assert.Equal(expectedBalance, actualBalance);
 
-			Assert.True(psbt.TryGetFee(out var fee));
-			Assert.Equal(Money.Coins(0.001m), fee);
+				Assert.True(psbt.TryGetFee(out var fee));
+				Assert.Equal(Money.Coins(0.001m), fee);
 
-			Assert.True(psbt.TryGetEstimatedFeeRate(out var estimated));
+				Assert.True(psbt.TryGetEstimatedFeeRate(out var estimated));
 
-			Assert.False(psbt.IsReadyToSign());
-			psbt.AddTransactions(funding);
-			Assert.True(psbt.IsReadyToSign());
-			psbt.SignAll(ScriptPubKeyType.Legacy, bobMaster);
-			psbt.SignAll(ScriptPubKeyType.Legacy, aliceMaster);
+				Assert.False(psbt.IsReadyToSign());
+				psbt.AddTransactions(funding);
+				Assert.True(psbt.IsReadyToSign());
+				psbt.SignAll(ScriptPubKeyType.Legacy, bobMaster);
+				psbt.SignAll(ScriptPubKeyType.Legacy, aliceMaster);
+				// Twice should be no-op
+				psbt.SignAll(ScriptPubKeyType.Legacy, bobMaster);
 
-			psbt.Finalize();
-			var result = psbt.ExtractTransaction();
-			Assert.True(builder.Verify(result));
+				psbt.Finalize();
+				var result = psbt.ExtractTransaction();
+				Assert.True(builder.Verify(result));
+			}
+		}
+
+		[Fact]
+		public void PSBTParsingShouldUseTheRightConsensusFactory()
+		{
+			var psbt = PSBT.Parse("cHNidP8BAKABAAAAAjzOZOqTmzoqy7rQ1KHnIkaak0mSVzPv5DtvPTvCjAzKAAAAAAD9////RNxEkYoZ/DN8b5DqBHJyUlqw+YOPV2y//wY3S8Z/Ig4BAAAAAP3///8C3JQwAQAAAAAZdqkUwH39zhYQLTpA+yZ9SSHkq9y1rEGIrADh9QUAAAAAGXapFBv+ozFlGBoA7+st28C45qrqFdp8iKwAAAAAAAEA/XQBAgAAAAL+IKvJIVWjWY0mFK0l1+bcEV3NJ1DR9a6BVgxPopR1AwEAAABqRzBEAiBKMOFJ7341UHGSq2mMsu7Tuup/WrWcG3opc4qCizsZEQIgWfbIISu7W1iRKlXgAODKCKxu2pGuGcwsl2Ke2tXExJoBIQOZcYGogH0HL1t2R5WnhUBgEYChDJRerjr6LsZmZy7t0/7///+tNbQ5jJd/4ZXJszKPaLa/RRRoLxbfTFiO6UKdTyiVdAAAAABqRzBEAiBYvo6rVsaNEqtJcXttj0rg+hTjxGkAUlATmqr57SrWlwIgTaYBzvfyPooGjY3LN0NX71cAgZL+jBmAa6nOsrlUpbkBIQOZcYGogH0HL1t2R5WnhUBgEYChDJRerjr6LsZmZy7t0/7///8CcN/1BQAAAAAZdqkUsOguNJiSLxXVqfzkyYiFcJv0vgiIrADh9QUAAAAAGXapFK831Px/KVRlHDKICTeChruGMg/JiKzG0B8AIgICFN+otSuSoj/5zbp0H1MtD+edEx7WwLsvnrLEfbCjErRIMEUCIQD2yd+PvhvjpxmFcFDFv3owFleCr4IzRwHwTovk/S7y7wIgCWgmH6WHRuf0++LouAJuWKJ7pjPD4W53UXkz7WmtfvQBIgYCFN+otSuSoj/5zbp0H1MtD+edEx7WwLsvnrLEfbCjErQYChHi6CwAAIABAACAAAAAgAEAAAAKAAAAAAEA/XUBAQAAAALcjOdC7uRb/bqGnrU6Il6jcdZFeePGFZmkB4UNnwrfGgEAAABqRzBEAiB4ubLFsMIdUKl2SmGhNKdT1fTc46Ir4m2cFM9D8dtB7AIgL4cD2sSqPAdqPldtviV8dHqkjjrdXNrDkAbxjAZQzgABIQONBtYWZOSeDXT/eNAQoIcQYSwtwvkfse9m5wEgxkz4n/3////cjOdC7uRb/bqGnrU6Il6jcdZFeePGFZmkB4UNnwrfGgAAAABrSDBFAiEAndyxtsqQ+aB6s5FaGBhmQhOwhm35TOImMBEDF9jjV5oCIBg+0GQYIGvUWqXaGGxCDsngiWy5P0Tk+ngtuDCWzREpASEC55mD+vA5xSJmYvfcsYH5sykhFnsJdujFPhn2Fg+5HL39////AgDh9QUAAAAAGXapFKBSbBywL1pp4x1JqqX4jFKm2ZTdiKyEKDEBAAAAABl2qRS+dL66EpzsCxfpNVycmI5NNtKDWIisAAAAACICAkOieg7z1fAIG2cfcLj+ZFJ3L3L+yVk1tRApOHz8UwOQSDBFAiEA1bv9YiUDip8YfrBZjv76N783CQSzhj8ykdOQvpALOsECIHKAkrHCNhkF7hN6Eng11IJeqDgxEtZpFt0mGvP5xokKASIGAkOieg7z1fAIG2cfcLj+ZFJ3L3L+yVk1tRApOHz8UwOQGAoR4ugsAACAAQAAgAAAAIABAAAABwAAAAAiAgJbvS/OS/2Jnwd/aGbOJmqXrgL9YcYFarUm+ahIBAuwQBgKEeLoLAAAgAEAAIAAAACAAQAAAAsAAAAAIgID37dgjfw4pjjnV4nSdpZ4XTGqMYRLYeNuQaCD0YMtOOIYChHi6CwAAIABAACAAAAAgAAAAAAQAAAAAA==",
+				Altcoins.AltNetworkSets.Groestlcoin.Testnet);
+			var errors = psbt.CheckSanity();
+			Assert.Empty(errors);
+
+			psbt = PSBT.Parse("cHNidP8BAHEBAAAAAa5DWRuSCbbha7kDIp/LMMEZCYyyX4S6cBp7zWulUa/MAQAAAAD/////AhEoKgQAAAAAFgAU7nHAKjqvWjNf/8RQqlA77gFfVZcALTEBAAAAABYAFJetm1OALTie8TP5CY3/moUsteKlAAAAAAABAR8ljFsFAAAAABYAFO5xwCo6r1ozX//EUKpQO+4BX1WXIgIC1S6EeEs43Kpiqww0O0noYaUxYubyjtkZJIDCLyZBbx1HMEQCIG2DB/kiJIemnd1io2FH5YfmYbaYoUs0Yx5rujhTrYYJAiAM5uVbmbELCKssXXeVjKeD7hggtghj2OZcTIezwgfoTAEiBgLVLoR4SzjcqmKrDDQ7SehhpTFi5vKO2RkkgMIvJkFvHRgDOcj3VAAAgAEAAIAAAACAAQAAAAEAAAAAIgIC1S6EeEs43Kpiqww0O0noYaUxYubyjtkZJIDCLyZBbx0YAznI91QAAIABAACAAAAAgAEAAAABAAAAAAA=", Altcoins.AltNetworkSets.Groestlcoin.Testnet);
+			psbt.Finalize(); // Should be valid transaction
+			psbt.ExtractTransaction();
 		}
 
 		[Fact]
@@ -118,6 +136,29 @@ namespace NBitcoin.Tests
 				Assert.Equal(psbt, psbt2, ComparerInstance);
 			}
 		}
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void AddCoinsShouldNotRemoveInfoFromPSBT()
+		{
+			var psbt = PSBT.Parse("cHNidP8BAMUCAAAAAjm0TK7iZu3RS16BLuYL/CR9HY2eRlQGVx1xewU1T6xAAAAAAAD/////PihXS4IEUUJG1EFDdW5EFGD5OzzgIw6rEhOqlpqitZwAAAAAAP////8DUsXrCwAAAAAiACBVmZAFkOU/PQ6UIMllsbJV7/ifdH/k6CcJKv1Gl9YgiOHc9QUAAAAAFgAUIGAQWuW00fyrWEvq9QZQ7AlcoTQt3PUFAAAAABYAFO4+pJ5Q9U7MVK33/5A1rt6OUFzxAAAAAAABAR8AwusLAAAAABYAFGqIBjv6pJ8EyEQk21oyoAyCYPu4AAEBIADC6wsAAAAAF6kUL7E4PUEaMOH84KTEW0txEy9hSw2HAQQiACANm5rxqXLoh2DLZbduH7R6USCVuyMAEqh+2x3OYLp7gQAAAAA=", Network.Main);
+			Assert.True(psbt.TryGetFinalizedHash(out var actualHash));
+			Assert.Equal(new uint256("5d7bd33c258e0d7a1ac806304d9ab1b518cd0ab194f01248be9b52c704cc5fb7"), actualHash);
+		}
+
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void CalculateFinalizedHashCorrectly()
+		{
+			var psbt = PSBT.Parse("cHNidP8BAMUCAAAAAjm0TK7iZu3RS16BLuYL/CR9HY2eRlQGVx1xewU1T6xAAAAAAAD/////PihXS4IEUUJG1EFDdW5EFGD5OzzgIw6rEhOqlpqitZwAAAAAAP////8DUsXrCwAAAAAiACBVmZAFkOU/PQ6UIMllsbJV7/ifdH/k6CcJKv1Gl9YgiOHc9QUAAAAAFgAUIGAQWuW00fyrWEvq9QZQ7AlcoTSm2/UFAAAAABYAFO4+pJ5Q9U7MVK33/5A1rt6OUFzxAAAAAAABAFICAAAAAbNOQ0W2oHIm8aqR8lFQlldP1gme7xzZiFyNBp5RmM92AAAAAAAAAAAAAQDC6wsAAAAAFgAUaogGO/qknwTIRCTbWjKgDIJg+7gAAAAAAAEBIADC6wsAAAAAF6kUL7E4PUEaMOH84KTEW0txEy9hSw2HAQBTAgAAAAGzTkNFtqByJvGqkfJRUJZXT9YJnu8c2YhcjQaeUZjPdgAAAAAAAAAAAAEAwusLAAAAABepFC+xOD1BGjDh/OCkxFtLcRMvYUsNhwAAAAABBCIAIA2bmvGpcuiHYMtlt24ftHpRIJW7IwASqH7bHc5gunuBAAAAAA==", Network.Main);
+			psbt.AssertSanity();
+			Assert.True(psbt.TryGetFinalizedHash(out var actualHash));
+			Assert.Equal(new uint256("de509e9a6873ca54953a1e69df66bdda3a9e9b296cb3bbeddaffad61a2a25721"), actualHash);
+
+			// This PSBT is finalized, but missing the FinalScriptSig while being P2SH, so there must be something missing
+			psbt = PSBT.Parse("cHNidP8BAMUCAAAAAjm0TK7iZu3RS16BLuYL/CR9HY2eRlQGVx1xewU1T6xAAAAAAAD/////PihXS4IEUUJG1EFDdW5EFGD5OzzgIw6rEhOqlpqitZwAAAAAAP////8DUsXrCwAAAAAiACBVmZAFkOU/PQ6UIMllsbJV7/ifdH/k6CcJKv1Gl9YgiOHc9QUAAAAAFgAUIGAQWuW00fyrWEvq9QZQ7AlcoTSm2/UFAAAAABYAFO4+pJ5Q9U7MVK33/5A1rt6OUFzxAAAAAAABAFICAAAAAbNOQ0W2oHIm8aqR8lFQlldP1gme7xzZiFyNBp5RmM92AAAAAAAAAAAAAQDC6wsAAAAAFgAUaogGO/qknwTIRCTbWjKgDIJg+7gAAAAAAQhrAkcwRAIgTtzpX90hQU00ur2DPXOZkBMXjNrEW+76cQkr6k1kntkCIE2RVauwzntgDCIjD8oiy3Aa3vd+G1POBgxKHTbLxaYoASECAclP4nUttStBOIr13akOh+b4PaX1mtGAjNLCNZmv/AsAAQBTAgAAAAGzTkNFtqByJvGqkfJRUJZXT9YJnu8c2YhcjQaeUZjPdgAAAAAAAAAAAAEAwusLAAAAABepFC+xOD1BGjDh/OCkxFtLcRMvYUsNhwAAAAABCNoEAEcwRAIgAn6VAAmlfVenn81OzH5bTQvqsWGmgDLNFOmDNiPU668CIB2lAu7gf2vXOuHARm1XOVRn9ApmwXHUWk2VnpI4qarGAUcwRAIgYbF54sTODDXxyu1hgFeDgFnj8vIiT32QIO5wYfM4KK8CIA2vIMATbqXK14uL00cX7VOgizSraeDvnPHnMKU1M72oAUdSIQJX9gQalUVw7G/bOOig6t7gy8aZrhPkuqDXVYOI6urtgCECKpV4nSq48v2Ruf+0l87cbH9aWBEsHUcO9U6QL5Q7iH9SrgAAAAA=", Network.Main);
+			Assert.False(psbt.TryGetFinalizedHash(out actualHash));
+		}
+
 		[Fact]
 		[Trait("UnitTest", "UnitTest")]
 		public void ShouldPreserveOriginalTxPropertyAsPossible()
@@ -240,8 +281,10 @@ namespace NBitcoin.Tests
 
 			clonedPSBT.SignWithKeys(keys[0]);
 			psbtWithTXs.SignWithKeys(keys[1], keys[2]);
-
-			var whollySignedPSBT = clonedPSBT.Combine(psbtWithTXs);
+			var originalClonedPSBT = clonedPSBT.Clone();
+			bool useCombine = true;
+		retry:
+			var whollySignedPSBT = useCombine ? clonedPSBT.Combine(psbtWithTXs) : clonedPSBT.UpdateFrom(psbtWithTXs);
 
 			// must sign only once for whole kinds of non-multisig tx.
 			Assert.Single(whollySignedPSBT.Inputs[0].PartialSigs);
@@ -269,6 +312,12 @@ namespace NBitcoin.Tests
 			builder.AddCoins(coins).AddKeys(keys);
 			if (!builder.Verify(finalTX, (Money)null, out var errors))
 				throw new InvalidOperationException(errors.Aggregate(string.Empty, (a, b) => a + ";\n" + b));
+			if (useCombine)
+			{
+				useCombine = false;
+				clonedPSBT = originalClonedPSBT;
+				goto retry;
+			}
 		}
 
 		[Fact]
@@ -285,6 +334,46 @@ namespace NBitcoin.Tests
 
 		[Fact]
 		[Trait("UnitTest", "UnitTest")]
+		public void OutputKeyPathCorrect()
+		{
+			var keys = Enumerable.Range(0, 5).Select(_ => new ExtKey()).ToArray();
+
+			var accountKey = new KeyPath("84'/0'/0'");
+			var accountKeys = keys.Select(k => k.Derive(accountKey).Neuter()).ToArray();
+			var depositPath = new KeyPath("0/0");
+			var changePath = new KeyPath("1/0");
+			var depositRedeem = PayToMultiSigTemplate.Instance.GenerateScriptPubKey(2, accountKeys.Select(k => k.Derive(depositPath).PubKey).ToArray());
+			var changeRedeem = PayToMultiSigTemplate.Instance.GenerateScriptPubKey(2, accountKeys.Select(k => k.Derive(changePath).PubKey).ToArray());
+
+			var c1 = CreateCoin(depositRedeem);
+
+			var builder = Network.RegTest.CreateTransactionBuilder();
+			builder.ShuffleOutputs = false;
+			builder.AddCoins(c1);
+			builder.SendEstimatedFees(new FeeRate(1.0m));
+			builder.Send(BitcoinAddress.Create("bc1qeef3jecqytj8j2xnjzduf5mu9c6jsqwd4hmvyv2zw8hzpf7a47nqrws5sn", Network.Main), Money.Coins(0.2m));
+			builder.SetChange(changeRedeem.WitHash.ScriptPubKey);
+			var psbt = builder.BuildPSBT(false);
+			psbt.AddScripts(changeRedeem);
+			foreach (var k in accountKeys)
+			{
+				psbt.AddKeyPath(k, depositPath);
+				psbt.AddKeyPath(k, changePath);
+			}
+			Assert.Empty(psbt.Outputs[0].HDKeyPaths);
+			Assert.NotEmpty(psbt.Outputs[1].HDKeyPaths);
+		}
+
+		int i = 0;
+		private ScriptCoin CreateCoin(Script redeem)
+		{
+			var outpoint = new OutPoint(uint256.Zero, i++);
+			var txout = new TxOut(Money.Coins(1.0m), redeem.WitHash.ScriptPubKey);
+			return new ScriptCoin(outpoint, txout, redeem);
+		}
+
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
 		public void ShouldCaptureExceptionInFinalization()
 		{
 			var keys = new Key[] { new Key(), new Key(), new Key() }.Select(k => k.GetWif(Network.RegTest)).ToArray();
@@ -294,7 +383,6 @@ namespace NBitcoin.Tests
 
 			var tx = CreateTxToSpendFunds(funds, keys, redeem, false, false);
 			var psbt = PSBT.FromTransaction(tx, Network.Main);
-
 			var ex = Assert.Throws<PSBTException>(() => psbt.Finalize());
 			Assert.Equal(6, ex.Errors.GroupBy(e => e.InputIndex).Count());
 		}
@@ -441,7 +529,7 @@ namespace NBitcoin.Tests
 			var bobKeyhex2 = (string)testcase["key10"]["wif"];
 			Assert.Equal(bobKey1, new BitcoinSecret(bobKeyhex1, network).PrivateKey);
 			Assert.Equal(bobKey2, new BitcoinSecret(bobKeyhex2, network).PrivateKey);
-			psbtForBob.Settings.UseLowR = false;
+			psbtForBob.Settings.SigningOptions.EnforceLowR = false;
 			psbtForBob.SignWithKeys(bobKey1, bobKey2);
 			expected = PSBT.Parse((string)testcase["psbt5"], Network.Main);
 			Assert.Equal(expected, psbtForBob);
@@ -589,7 +677,7 @@ namespace NBitcoin.Tests
 			expectedPsbt = PSBT.Parse("70736274ff01009a020000000258e87a21b56daf0c23be8e7070456c336f7cbaa5c8757924f545887bb2abdd750000000000ffffffff838d0427d0ec650a68aa46bb0b098aea4422c071b2ca78352a077959d07cea1d0100000000ffffffff0270aaf00800000000160014d85c2b71d0060b09c9886aeb815e50991dda124d00e1f5050000000016001400aea9a2e5f0f876a588df5546e8742d1d87008f00000000000100bb0200000001aad73931018bd25f84ae400b68848be09db706eac2ac18298babee71ab656f8b0000000048473044022058f6fc7c6a33e1b31548d481c826c015bd30135aad42cd67790dab66d2ad243b02204a1ced2604c6735b6393e5b41691dd78b00f0c5942fb9f751856faa938157dba01feffffff0280f0fa020000000017a9140fb9463421696b82c833af241c78c17ddbde493487d0f20a270100000017a91429ca74f8a08f81999428185c97b5d852e4063f618765000000010304010000000104475221029583bf39ae0a609747ad199addd634fa6108559d6c5cd39b4c2183f1ab96e07f2102dab61ff49a14db6a7d02b0cd1fbb78fc4b18312b5b4e54dae4dba2fbfef536d752ae2206029583bf39ae0a609747ad199addd634fa6108559d6c5cd39b4c2183f1ab96e07f10d90c6a4f000000800000008000000080220602dab61ff49a14db6a7d02b0cd1fbb78fc4b18312b5b4e54dae4dba2fbfef536d710d90c6a4f0000008000000080010000800001012000c2eb0b0000000017a914b7f5faf40e3d40a5a459b1db3535f2b72fa921e8870103040100000001042200208c2353173743b595dfb4a07b72ba8e42e3797da74e87fe7d9d7497e3b2028903010547522103089dc10c7ac6db54f91329af617333db388cead0c231f723379d1b99030b02dc21023add904f3d6dcf59ddb906b0dee23529b7ffb9ed50e5e86151926860221f0e7352ae2206023add904f3d6dcf59ddb906b0dee23529b7ffb9ed50e5e86151926860221f0e7310d90c6a4f000000800000008003000080220603089dc10c7ac6db54f91329af617333db388cead0c231f723379d1b99030b02dc10d90c6a4f00000080000000800200008000220203a9a4c37f5996d3aa25dbac6b570af0650394492942460b354753ed9eeca5877110d90c6a4f000000800000008004000080002202027f6399757d2eff55a136ad02c684b1838b6556e5f1b6b34282a94b6b5005109610d90c6a4f00000080000000800500008000", extkey.Network);
 			Assert.Equal(expectedPsbt, actualPsbt);
 
-			actualPsbt.Settings.UseLowR = false;
+			actualPsbt.Settings.SigningOptions.EnforceLowR = false;
 			expectedPsbt = PSBT.Parse("70736274ff01009a020000000258e87a21b56daf0c23be8e7070456c336f7cbaa5c8757924f545887bb2abdd750000000000ffffffff838d0427d0ec650a68aa46bb0b098aea4422c071b2ca78352a077959d07cea1d0100000000ffffffff0270aaf00800000000160014d85c2b71d0060b09c9886aeb815e50991dda124d00e1f5050000000016001400aea9a2e5f0f876a588df5546e8742d1d87008f00000000000100bb0200000001aad73931018bd25f84ae400b68848be09db706eac2ac18298babee71ab656f8b0000000048473044022058f6fc7c6a33e1b31548d481c826c015bd30135aad42cd67790dab66d2ad243b02204a1ced2604c6735b6393e5b41691dd78b00f0c5942fb9f751856faa938157dba01feffffff0280f0fa020000000017a9140fb9463421696b82c833af241c78c17ddbde493487d0f20a270100000017a91429ca74f8a08f81999428185c97b5d852e4063f6187650000002202029583bf39ae0a609747ad199addd634fa6108559d6c5cd39b4c2183f1ab96e07f473044022074018ad4180097b873323c0015720b3684cc8123891048e7dbcd9b55ad679c99022073d369b740e3eb53dcefa33823c8070514ca55a7dd9544f157c167913261118c01010304010000000104475221029583bf39ae0a609747ad199addd634fa6108559d6c5cd39b4c2183f1ab96e07f2102dab61ff49a14db6a7d02b0cd1fbb78fc4b18312b5b4e54dae4dba2fbfef536d752ae2206029583bf39ae0a609747ad199addd634fa6108559d6c5cd39b4c2183f1ab96e07f10d90c6a4f000000800000008000000080220602dab61ff49a14db6a7d02b0cd1fbb78fc4b18312b5b4e54dae4dba2fbfef536d710d90c6a4f0000008000000080010000800001012000c2eb0b0000000017a914b7f5faf40e3d40a5a459b1db3535f2b72fa921e887220203089dc10c7ac6db54f91329af617333db388cead0c231f723379d1b99030b02dc473044022062eb7a556107a7c73f45ac4ab5a1dddf6f7075fb1275969a7f383efff784bcb202200c05dbb7470dbf2f08557dd356c7325c1ed30913e996cd3840945db12228da5f010103040100000001042200208c2353173743b595dfb4a07b72ba8e42e3797da74e87fe7d9d7497e3b2028903010547522103089dc10c7ac6db54f91329af617333db388cead0c231f723379d1b99030b02dc21023add904f3d6dcf59ddb906b0dee23529b7ffb9ed50e5e86151926860221f0e7352ae2206023add904f3d6dcf59ddb906b0dee23529b7ffb9ed50e5e86151926860221f0e7310d90c6a4f000000800000008003000080220603089dc10c7ac6db54f91329af617333db388cead0c231f723379d1b99030b02dc10d90c6a4f00000080000000800200008000220203a9a4c37f5996d3aa25dbac6b570af0650394492942460b354753ed9eeca5877110d90c6a4f000000800000008004000080002202027f6399757d2eff55a136ad02c684b1838b6556e5f1b6b34282a94b6b5005109610d90c6a4f00000080000000800500008000", extkey.Network);
 			var tmp = actualPsbt.Clone();
 			// Given the above updated PSBT, a signer that supports SIGHASH_ALL for P2PKH and P2WPKH spends and uses RFC6979 for nonce generation and has the following keys:
@@ -664,7 +752,7 @@ namespace NBitcoin.Tests
 			tx.Inputs.Add(new OutPoint(funds[3].GetHash(), 0)); // p2sh-p2wpkh
 			tx.Inputs.Add(new OutPoint(funds[4].GetHash(), 0)); // p2sh-p2wsh
 
-			var dummyOut = new TxOut(Money.Coins(0.599m), keys[0]);
+			var dummyOut = new TxOut(Money.Coins(0.599m), keys[0].PrivateKey);
 			tx.Outputs.Add(dummyOut);
 
 			if (withScript)

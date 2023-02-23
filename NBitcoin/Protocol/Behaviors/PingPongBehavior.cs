@@ -119,7 +119,7 @@ namespace NBitcoin.Protocol.Behaviors
 						return;
 					if (_CurrentPing != null)
 						return;
-					_CurrentPing = new PingPayload();
+					_CurrentPing = node.Network.Consensus.ConsensusFactory.CreatePingPayload();
 					_DateSent = DateTimeOffset.UtcNow;
 					node.SendMessageAsync(_CurrentPing);
 					_PingTimeoutTimer = new Timer(PingTimeout, _CurrentPing, (int)TimeoutInterval.TotalMilliseconds, Timeout.Infinite);

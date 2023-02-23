@@ -1,6 +1,7 @@
 ﻿using NBitcoin.DataEncoders;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace NBitcoin
@@ -38,13 +39,16 @@ namespace NBitcoin
 #if HAS_SPAN
 		public HDFingerprint(ReadOnlySpan<byte> bytes)
 		{
-			if (bytes == null)
-				throw new ArgumentNullException(nameof(bytes));
 			if (bytes.Length != 4)
 				throw new ArgumentException(paramName: nameof(bytes), message: "Bytes should be of length 4");
 			_Value = Utils.ToUInt32(bytes, true);
 		}
 #endif
+
+		public static HDFingerprint FromKeyId(KeyId id)
+		{
+			return new HDFingerprint(id.ToBytes().Take(4).ToArray());
+		}
 
 		public HDFingerprint(byte[] bytes, int index)
 		{

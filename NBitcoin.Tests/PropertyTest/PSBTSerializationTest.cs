@@ -25,7 +25,7 @@ namespace NBitcoin.Tests.PropertyTest
 			ComparerInstance = new PSBTComparer();
 		}
 
-		[Property(MaxTest = 10)]
+		[Property(MaxTest = 5)]
 		[Trait("UnitTest", "UnitTest")]
 		public void CanCloneAndCombine(PSBT psbt)
 		{
@@ -35,7 +35,8 @@ namespace NBitcoin.Tests.PropertyTest
 			Assert.Equal(psbt, combined, ComparerInstance);
 		}
 
-		[Property(MaxTest = 10)]
+		[Property(MaxTest = 5)]
+		[Trait("UnitTest", "UnitTest")]
 		public void CanCoinJoin(PSBT a, PSBT b)
 		{
 			var result = a.CoinJoin(b);
@@ -43,7 +44,7 @@ namespace NBitcoin.Tests.PropertyTest
 			Assert.Equal(result.Outputs.Count, a.Outputs.Count + b.Outputs.Count);
 			Assert.Equal(result.tx.Inputs.Count, a.tx.Inputs.Count + b.tx.Inputs.Count);
 			Assert.Equal(result.tx.Outputs.Count, a.tx.Outputs.Count + b.tx.Outputs.Count);
-			// These will work in netcoreapp2.1, but not in net461 ... :(
+			// These will work in netcoreapp2.1, but not in net472 ... :(
 			// Assert.Subset<PSBTInput>(result.inputs.ToHashSet(), a.inputs.ToHashSet());
 			// Assert.Subset<PSBTInput>(result.inputs.ToHashSet(), b.inputs.ToHashSet());
 			// Assert.Subset<PSBTOutput>(result.outputs.ToHashSet(), a.outputs.ToHashSet());

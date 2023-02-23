@@ -1,4 +1,5 @@
-﻿using NBitcoin.JsonConverters;
+﻿using NBitcoin.DataEncoders;
+using NBitcoin.JsonConverters;
 using NBitcoin.OpenAsset;
 using System;
 using System.Collections.Generic;
@@ -30,7 +31,7 @@ namespace NBitcoin.Tests
 			CanSerializeInJsonCore(new AssetId(k.PubKey));
 			CanSerializeInJsonCore(k.PubKey.ScriptPubKey);
 			CanSerializeInJsonCore(new Key().PubKey.WitHash.GetAddress(Network.Main), Network.Main);
-			CanSerializeInJsonCore(new Key().PubKey.WitHash.ScriptPubKey.GetWitScriptAddress(Network.Main), Network.Main);
+			CanSerializeInJsonCore(new Key().PubKey.WitHash.ScriptPubKey.WitHash.GetAddress(Network.Main), Network.Main);
 			var sig = k.Sign(new uint256(RandomUtils.GetBytes(32)));
 			CanSerializeInJsonCore(sig);
 			CanSerializeInJsonCore(new TransactionSignature(sig, SigHash.All));
@@ -40,9 +41,13 @@ namespace NBitcoin.Tests
 			CanSerializeInJsonCore(k);
 			CanSerializeInJsonCore(k.PubKey);
 			CanSerializeInJsonCore(new WitScript(new Script(Op.GetPushOp(sig.ToDER()), Op.GetPushOp(sig.ToDER()))));
+			CanSerializeInJsonCore(new WitScript(OpcodeType.OP_0, OpcodeType.OP_0));
 			CanSerializeInJsonCore(new LockTime(1));
 			CanSerializeInJsonCore(new LockTime(130), out var str);
 			Assert.Equal("130", str);
+			var chain = CanSerializeInJsonCore(new ChainName("lol"), out str);
+			Assert.Equal("Lol", chain.ToString());
+			Assert.Equal("\"Lol\"", str);
 			CanSerializeInJsonCore(new LockTime(DateTime.UtcNow));
 			CanSerializeInJsonCore(new Sequence(1));
 			CanSerializeInJsonCore(new Sequence?(1));
@@ -52,6 +57,13 @@ namespace NBitcoin.Tests
 			CanSerializeInJsonCore(new FeeRate(0.5m));
 			CanSerializeInJsonCore(new HDFingerprint(0x0a), out str);
 			Assert.Equal("\"0a000000\"", str);
+			var feerate = Serializer.ToObject<FeeRate>("1");
+			Assert.Equal(new FeeRate(Money.Satoshis(1.0m), 1), feerate);
+			feerate = Serializer.ToObject<FeeRate>("1.0");
+			Assert.Equal("1 Sat/B", feerate.ToString());
+			Assert.Equal(new FeeRate(Money.Satoshis(1.0m), 1), feerate);
+			feerate = Serializer.ToObject<FeeRate>("0.001");
+			Assert.Equal("0.001 Sat/B", feerate.ToString());
 			var print = Serializer.ToObject<HDFingerprint>("\"0a000000\"");
 			var print2 = Serializer.ToObject<HDFingerprint>("10");
 			Assert.Equal(print, print2);
@@ -76,6 +88,15 @@ namespace NBitcoin.Tests
 			CanSerializeInJsonCore(expectedOutpoint, out str);
 			Assert.Equal("\"44f69ca74088d6d88e30156da85aae54543a87f67cdfdabbe9b53a92d6d7027c01000000\"", str);
 
+			var key = new Key(Encoders.Hex.DecodeData("ce71d1851c03cc6c0331020391113acbf6843b32065e53e4308984537630eee1"));
+			var pubkey = new PubKey(Encoders.Hex.DecodeData("02eae22800451728c177244a79be8ff22e92d08ec3a5cdd0b6d4b54fa7a90bb44c"));
+			var internalKey = new TaprootInternalPubKey(Encoders.Hex.DecodeData("eae22800451728c177244a79be8ff22e92d08ec3a5cdd0b6d4b54fa7a90bb44c"));
+			var outputKey = new TaprootPubKey(Encoders.Hex.DecodeData("6bf657f19f5917eb6197ae123caf435611a1d35ba23a2d3394e579208d0f18d4"));
+			CanSerializeInJsonCore(key, out str);
+			CanSerializeInJsonCore(internalKey, out str);
+			CanSerializeInJsonCore(outputKey, out str);
+			CanSerializeInJsonCore(key.PubKey, out str);
+
 			Assert.Throws<JsonObjectException>(() =>
 			{
 				Serializer.ToObject<OutPoint>("1");
@@ -94,6 +115,7 @@ namespace NBitcoin.Tests
 			str = Serializer.ToString(value);
 			var obj2 = Serializer.ToObject<T>(str);
 			Assert.Equal(str, Serializer.ToString(obj2));
+			Assert.Equal(obj2, value);
 			return obj2;
 		}
 	}

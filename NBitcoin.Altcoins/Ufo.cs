@@ -110,8 +110,9 @@ namespace NBitcoin.Altcoins
                 MinerConfirmationWindow = 13440,
                 CoinbaseMaturity = 100,
                 LitecoinWorkCalculation = true,
-                ConsensusFactory = UfoConsensusFactory.Instance
-            })
+                ConsensusFactory = UfoConsensusFactory.Instance,
+				SupportSegwit = true
+			})
             .SetBase58Bytes(Base58Type.PUBKEY_ADDRESS, new byte[] { 27 })
             .SetBase58Bytes(Base58Type.SCRIPT_ADDRESS, new byte[] { 68 })
             .SetBase58Bytes(Base58Type.SECRET_KEY, new byte[] { 155 })
@@ -124,7 +125,8 @@ namespace NBitcoin.Altcoins
             .SetRPCPort(9888)
             .SetName("ufo-main")
             .AddAlias("Ufo-mainnet")
-            .AddDNSSeeds(new[]
+			.SetUriScheme("ufo")
+			.AddDNSSeeds(new[]
             {
                 new DNSSeedData("Ufocoin.net", "seed1.ufocoin.net"),
                 new DNSSeedData("ufocoin.net", "seed2.ufocoin.net"),
@@ -154,8 +156,9 @@ namespace NBitcoin.Altcoins
                 MinerConfirmationWindow = 500,
                 CoinbaseMaturity = 100,
                 LitecoinWorkCalculation = true,
-				ConsensusFactory = UfoConsensusFactory.Instance
-            })
+				ConsensusFactory = UfoConsensusFactory.Instance,
+				SupportSegwit = true
+			})
             .SetBase58Bytes(Base58Type.PUBKEY_ADDRESS, new byte[] { 111 })
             .SetBase58Bytes(Base58Type.SCRIPT_ADDRESS, new byte[] { 130 })
             .SetBase58Bytes(Base58Type.SECRET_KEY, new byte[] { 239 })
@@ -168,7 +171,8 @@ namespace NBitcoin.Altcoins
             .SetRPCPort(19888)
             .SetName("ufo-test")
             .AddAlias("Ufo-testnet")
-            .AddDNSSeeds(new[]
+			.SetUriScheme("ufo")
+			.AddDNSSeeds(new[]
             {
                 new DNSSeedData("ufocoin.net", "testnet-seed.ufocoin.net"),
             })
@@ -196,8 +200,9 @@ namespace NBitcoin.Altcoins
                 RuleChangeActivationThreshold = 108,
                 MinerConfirmationWindow = 144,
                 CoinbaseMaturity = 100,
-                ConsensusFactory = UfoConsensusFactory.Instance
-            })
+                ConsensusFactory = UfoConsensusFactory.Instance,
+				SupportSegwit = true
+			})
             .SetBase58Bytes(Base58Type.PUBKEY_ADDRESS, new byte[] { 111 })
             .SetBase58Bytes(Base58Type.SCRIPT_ADDRESS, new byte[] { 130 })
             .SetBase58Bytes(Base58Type.SECRET_KEY, new byte[] { 239 })
@@ -210,7 +215,8 @@ namespace NBitcoin.Altcoins
             .SetRPCPort(18445)
             .SetName("ufo-reg")
             .AddAlias("Ufo-regtest")
-            .SetGenesis("0100000000000000000000000000000000000000000000000000000000000000000000006570e7f569717849280945b767d0a8ae3a1240e510c8a0abdcbfa5283adf0782dae5494dffff7f20030000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff1604ffff001d01040e32206a616e756172792032303134ffffffff0100000000000000000200ac00000000");
+			.SetUriScheme("ufo")
+			.SetGenesis("0100000000000000000000000000000000000000000000000000000000000000000000006570e7f569717849280945b767d0a8ae3a1240e510c8a0abdcbfa5283adf0782dae5494dffff7f20030000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff1604ffff001d01040e32206a616e756172792032303134ffffffff0100000000000000000200ac00000000");
             return builder;
 
         }

@@ -1,15 +1,17 @@
+#if !HAS_SPAN
 using System;
 using System.Collections;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
-
+#if !NO_BC
 using NBitcoin.BouncyCastle.Security;
+#endif
 using NBitcoin.BouncyCastle.Utilities;
 
 namespace NBitcoin.BouncyCastle.Math
 {
-	public class BigInteger
+	class BigInteger
 	{
 		// The first few odd primes
 		/*
@@ -177,7 +179,9 @@ namespace NBitcoin.BouncyCastle.Math
 		private const int chunk2 = 1, chunk8 = 1, chunk10 = 19, chunk16 = 16;
 		private static readonly BigInteger radix2, radix2E, radix8, radix8E, radix10, radix10E, radix16, radix16E;
 
+#if !NO_BC
 		private static readonly SecureRandom RandomSource = new SecureRandom();
+#endif
 
 		/*
          * These are the threshold bit-lengths (of an exponent) where we increase the window size.
@@ -244,12 +248,12 @@ namespace NBitcoin.BouncyCastle.Math
 		{
 			return (nBits + BitsPerByte - 1) / BitsPerByte;
 		}
-
+#if !NO_BC
 		internal static BigInteger Arbitrary(int sizeInBits)
 		{
 			return new BigInteger(sizeInBits, RandomSource);
 		}
-
+#endif
 		private BigInteger(
 			int signum,
 			int[] mag,
@@ -1328,6 +1332,7 @@ namespace NBitcoin.BouncyCastle.Math
 			}
 		}
 
+#if !NO_BC
 		/**
          * return whether or not a BigInteger is probably prime with a
          * probability of 1 - (1/2)**certainty.
@@ -1353,7 +1358,7 @@ namespace NBitcoin.BouncyCastle.Math
 
 			return n.CheckProbablePrime(certainty, RandomSource, randomlySelected);
 		}
-
+#endif
 		private bool CheckProbablePrime(int certainty, Random random, bool randomlySelected)
 		{
 			Debug.Assert(certainty > 0);
@@ -2496,7 +2501,7 @@ namespace NBitcoin.BouncyCastle.Math
 
 			return new BigInteger(-sign, magnitude, false);
 		}
-
+#if !NO_BC
 		public BigInteger NextProbablePrime()
 		{
 			if (sign < 0)
@@ -2514,6 +2519,7 @@ namespace NBitcoin.BouncyCastle.Math
 
 			return n;
 		}
+#endif
 
 		public BigInteger Not()
 		{
@@ -3586,3 +3592,4 @@ namespace NBitcoin.BouncyCastle.Math
 		}
 	}
 }
+#endif

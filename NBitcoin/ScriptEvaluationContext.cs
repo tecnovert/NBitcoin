@@ -1,8 +1,12 @@
 ﻿using NBitcoin.Crypto;
+#if HAS_SPAN
+using NBitcoin.Secp256k1;
+#endif
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using static NBitcoin.TaprootConstants;
 
 namespace NBitcoin
 {
@@ -61,11 +65,19 @@ namespace NBitcoin
 		NullFail,
 		MinimalIf,
 		WitnessPubkeyType,
+		SchnorrSigSize,
+		SchnorrSigHashType,
+		SchnorrSig,
+		TaprootWrongControlSize,
+		DiscourageUpgradableTaprootVersion,
+		TapscriptValidationWeight,
+		DiscourageUpgradablePubKeyType,
+		DiscourageOpSuccess
 	}
-
+#nullable enable
 	public class TransactionChecker
 	{
-		public TransactionChecker(Transaction tx, int index, TxOut spentOutput, PrecomputedTransactionData precomputedTransactionData)
+		public TransactionChecker(Transaction tx, int index, TxOut? spentOutput, PrecomputedTransactionData? precomputedTransactionData)
 		{
 			if (tx == null)
 				throw new ArgumentNullException(nameof(tx));
@@ -74,7 +86,7 @@ namespace NBitcoin
 			_SpentOutput = spentOutput;
 			_PrecomputedTransactionData = precomputedTransactionData;
 		}
-		public TransactionChecker(Transaction tx, int index, TxOut spentOutput = null)
+		public TransactionChecker(Transaction tx, int index, TxOut? spentOutput = null)
 		{
 			if (tx == null)
 				throw new ArgumentNullException(nameof(tx));
@@ -84,12 +96,12 @@ namespace NBitcoin
 		}
 
 
-		private readonly PrecomputedTransactionData _PrecomputedTransactionData;
+		private PrecomputedTransactionData? _PrecomputedTransactionData;
 		public PrecomputedTransactionData PrecomputedTransactionData
 		{
 			get
 			{
-				return _PrecomputedTransactionData;
+				return _PrecomputedTransactionData ??= new PrecomputedTransactionData(Transaction);
 			}
 		}
 
@@ -119,19 +131,70 @@ namespace NBitcoin
 			}
 		}
 
-		private readonly TxOut _SpentOutput;
-		public TxOut SpentOutput
+		private readonly TxOut? _SpentOutput;
+		public TxOut? SpentOutput
 		{
 			get
 			{
 				return _SpentOutput;
 			}
 		}
-	}
+#if HAS_SPAN
+		public bool CheckSchnorrSignature(byte[] sig, byte[] pubkey_in, HashVersion taproot, ExecutionData executionData, out ScriptError err)
+		{
+			// Schnorr signatures have 32-byte public keys. The caller is responsible for enforcing this.
 
+			//assert(sigversion == SigVersion::TAPROOT || sigversion == SigVersion::TAPSCRIPT);
+			//assert(pubkey_in.size() == 32);
+
+			// Note that in Tapscript evaluation, empty signatures are treated specially (invalid signature that does not
+			// abort script execution). This is implemented in EvalChecksigTapscript, which won't invoke
+			// CheckSchnorrSignature in that case. In other contexts, they are invalid like every other signature with
+			// size different from 64 or 65.
+			if (sig.Length != 64 && sig.Length != 65)
+			{
+				err = ScriptError.SchnorrSigSize;
+				return false;
+			}
+
+			if (!TaprootPubKey.TryCreate(pubkey_in, out var pubkey))
+			{
+				// Technically, the pubkey is wrong, but bitcoin core code doesn't check this.
+				err = ScriptError.SchnorrSig;
+				return false;
+			}
+			if (!TaprootSignature.TryParse(sig, out var taprootSig))
+			{
+				err = ScriptError.SchnorrSigHashType;
+				return false;
+			}
+
+			if (((byte)taprootSig.SigHash & Transaction.SIGHASH_OUTPUT_MASK) == (byte)TaprootSigHash.Single && this.Index >= this.Transaction.Outputs.Count)
+			{
+				err = ScriptError.SchnorrSigHashType;
+				return false;
+			}
+
+			var hash = this.Transaction.GetSignatureHashTaproot(PrecomputedTransactionData, new TaprootExecutionData(this.Index, executionData.TapleafHash)
+			{
+				AnnexHash = executionData.AnnexHash,
+				CodeseparatorPosition = executionData.CodeseparatorPosition,
+				SigHash = taprootSig.SigHash
+			});
+			if (!pubkey.VerifySignature(hash, taprootSig.SchnorrSignature))
+			{
+				err = ScriptError.SchnorrSig;
+				return false;
+			}
+			err = ScriptError.OK;
+			return true;
+		}
+#endif
+	}
+#nullable restore
 	public class SignedHash
 	{
-		public TransactionSignature Signature
+		public ITransactionSignature Signature
 		{
 			get;
 			internal set;
@@ -155,10 +218,17 @@ namespace NBitcoin
 			internal set;
 		}
 	}
+
+	public class ExecutionData
+	{
+		public uint256 AnnexHash { get; set; }
+		public uint256 TapleafHash { get; internal set; }
+		public uint CodeseparatorPosition { get; set; } = 0xffffffff;
+		public long ValidationWeightLeft { get; set; }
+	}
 	public class ScriptEvaluationContext
 	{
-
-		class CScriptNum
+		internal class CScriptNum
 		{
 			const long nMaxNumSize = 4;
 			/**
@@ -343,12 +413,12 @@ namespace NBitcoin
 				return serialize(m_value);
 			}
 
-			static byte[] serialize(long value)
+			internal static byte[] serialize(long value)
 			{
 				if (value == 0)
 					return new byte[0];
 
-				var result = new List<byte>();
+				var result = new List<byte>(8);
 				bool neg = value < 0;
 				long absvalue = neg ? -value : value;
 
@@ -410,7 +480,6 @@ namespace NBitcoin
 		public ScriptEvaluationContext()
 		{
 			ScriptVerify = NBitcoin.ScriptVerify.Standard;
-			SigHash = NBitcoin.SigHash.Undefined;
 			Error = ScriptError.UnknownError;
 		}
 		public ScriptVerify ScriptVerify
@@ -418,27 +487,21 @@ namespace NBitcoin
 			get;
 			set;
 		}
-		public SigHash SigHash
-		{
-			get;
-			set;
-		}
-
-		[Obsolete("Use VerifyScript(Script scriptSig, Transaction txTo, int nIn, TxOut spentOutput) instead")]
-		public bool VerifyScript(Script scriptSig, Script scriptPubKey, Transaction txTo, int nIn, Money value)
-		{
-			TxOut txOut = txTo.Outputs.CreateNewTxOut(value, scriptPubKey);
-			return VerifyScript(scriptSig, scriptPubKey, new TransactionChecker(txTo, nIn, txOut));
-		}
+		public ExecutionData ExecutionData { get; set; } = new ExecutionData();
 
 		public bool VerifyScript(Script scriptSig, Transaction txTo, int nIn, TxOut spentOutput)
 		{
 			return VerifyScript(scriptSig, spentOutput.ScriptPubKey, new TransactionChecker(txTo, nIn, spentOutput));
 		}
-
 		public bool VerifyScript(Script scriptSig, Script scriptPubKey, TransactionChecker checker)
 		{
-			WitScript witness = checker.Input.WitScript;
+			return VerifyScript(scriptSig, checker.Input.WitScript, scriptPubKey, checker);
+		}
+		public bool VerifyScript(Script scriptSig, WitScript witness, Script scriptPubKey, TransactionChecker checker)
+		{
+			scriptSig = scriptSig ?? Script.Empty;
+			witness = witness ?? WitScript.Empty;
+			ExecutionData = new ExecutionData();
 			SetError(ScriptError.UnknownError);
 			if ((ScriptVerify & ScriptVerify.SigPushOnly) != 0 && !scriptSig.IsPushOnly)
 				return SetError(ScriptError.SigPushOnly);
@@ -471,7 +534,7 @@ namespace NBitcoin
 						// The scriptSig must be _exactly_ CScript(), otherwise we reintroduce malleability.
 						return SetError(ScriptError.WitnessMalleated);
 					}
-					if (!VerifyWitnessProgram(witness, wit, checker))
+					if (!VerifyWitnessProgram(witness, wit, checker, false))
 					{
 						return false;
 					}
@@ -517,7 +580,7 @@ namespace NBitcoin
 							// reintroduce malleability.
 							return SetError(ScriptError.WitnessMalleatedP2SH);
 						}
-						if (!VerifyWitnessProgram(witness, wit, checker))
+						if (!VerifyWitnessProgram(witness, wit, checker, true))
 						{
 							return false;
 						}
@@ -559,46 +622,102 @@ namespace NBitcoin
 
 			return true;
 		}
-
-		private bool VerifyWitnessProgram(WitScript witness, WitProgramParameters wit, TransactionChecker checker)
+		const byte ANNEX_TAG = 0x50;
+		// How much weight budget is added to the witness size (Tapscript only, see BIP 342).
+		private bool VerifyWitnessProgram(WitScript witness, WitProgramParameters wit, TransactionChecker checker, bool isP2SH)
 		{
-			List<byte[]> stack = new List<byte[]>();
-			Script scriptPubKey;
-
+			ContextStack<byte[]> stack = new ContextStack<byte[]>(witness.Pushes);
+			Script execScript; //!< Actually executed script (last stack item in P2WSH; implied P2PKH script in P2WPKH; leaf script in P2TR)
 			if (wit.Version == 0)
 			{
 				if (wit.Program.Length == 32)
 				{
 					// Version 0 segregated witness program: SHA256(CScript) inside the program, CScript + inputs in witness
-					if (witness.PushCount == 0)
+					if (stack.Count == 0)
 					{
 						return SetError(ScriptError.WitnessProgramEmpty);
 					}
-					scriptPubKey = Script.FromBytesUnsafe(witness.GetUnsafePush(witness.PushCount - 1));
-					for (int i = 0; i < witness.PushCount - 1; i++)
-					{
-						stack.Add(witness.GetUnsafePush(i));
-					}
-					var hashScriptPubKey = Hashes.SHA256(scriptPubKey.ToBytes(true));
+					execScript = Script.FromBytesUnsafe(stack.Pop());
+					var hashScriptPubKey = Hashes.SHA256(execScript.ToBytes(true));
 					if (!Utils.ArrayEqual(hashScriptPubKey, wit.Program))
 					{
 						return SetError(ScriptError.WitnessProgramMissmatch);
 					}
+					return ExecuteWitnessScript(stack, execScript, HashVersion.WitnessV0, checker);
 				}
 				else if (wit.Program.Length == 20)
 				{
 					// Special case for pay-to-pubkeyhash; signature + pubkey in witness
-					if (witness.PushCount != 2)
+					if (stack.Count != 2)
 					{
 						return SetError(ScriptError.WitnessProgramMissmatch); // 2 items in witness
 					}
-					scriptPubKey = PayToPubkeyHashTemplate.Instance.GenerateScriptPubKey(new KeyId(wit.Program));
-					stack = witness.Pushes.ToList();
+					execScript = PayToPubkeyHashTemplate.Instance.GenerateScriptPubKey(new KeyId(wit.Program));
+					return ExecuteWitnessScript(stack, execScript, HashVersion.WitnessV0, checker);
 				}
 				else
 				{
 					return SetError(ScriptError.WitnessProgramWrongLength);
 				}
+			}
+			else if (wit.Version == OpcodeType.OP_1 && wit.Program.Length == 32 && !isP2SH)
+			{
+#if HAS_SPAN
+				// BIP341 Taproot: 32-byte non-P2SH witness v1 program (which encodes a P2C-tweaked pubkey)
+				if (!this.ScriptVerify.HasFlag(ScriptVerify.Taproot))
+					return SetSuccess(ScriptError.OK);
+				if (stack.Count == 0) return SetError(ScriptError.WitnessProgramEmpty);
+				if (stack.Count >= 2 && stack.First() is byte[] b && b.Length > 0 && b[0] == ANNEX_TAG)
+				{
+					// Drop annex (this is non-standard; see IsWitnessStandard)
+					var annex = stack.Pop();
+					HashStream h = new HashStream() { SingleSHA256 = true };
+					BitcoinStream bs = new BitcoinStream(h, true);
+					bs.ReadWriteAsVarString(ref annex);
+					ExecutionData.AnnexHash = h.GetHash();
+				}
+				if (stack.Count == 1)
+				{
+					// Key path spending (stack size is 1 after removing optional annex)
+					if (!checker.CheckSchnorrSignature(stack.First(), wit.Program, HashVersion.Taproot, ExecutionData, out var err))
+					{
+						return SetError(err);
+					}
+					return true;
+				}
+				else
+				{
+					// Script path spending (stack size is >1 after removing optional annex)
+					var control = stack.Pop();
+					var scriptBytes = stack.Pop();
+					execScript = Script.FromBytesUnsafe(scriptBytes);
+					if (control.Length < TAPROOT_CONTROL_BASE_SIZE || control.Length > TAPROOT_CONTROL_MAX_SIZE || ((control.Length - TAPROOT_CONTROL_BASE_SIZE) % TAPROOT_CONTROL_NODE_SIZE) != 0)
+					{
+						return SetError(ScriptError.TaprootWrongControlSize);
+					}
+					ExecutionData.TapleafHash = ComputeTapleafHash((byte)(control[0] & TAPROOT_LEAF_MASK), execScript);
+					if (!VerifyTaprootCommitment(control, wit.Program, ExecutionData.TapleafHash))
+					{
+						return SetError(ScriptError.WitnessProgramMissmatch);
+					}
+					if ((control[0] & TAPROOT_LEAF_MASK) == TAPROOT_LEAF_TAPSCRIPT)
+					{
+						// Tapscript (leaf version 0xc0)
+						ExecutionData.ValidationWeightLeft = witness.GetSerializedSize() + VALIDATION_WEIGHT_OFFSET;
+						return ExecuteWitnessScript(stack, execScript, HashVersion.Tapscript, checker);
+					}
+					if (ScriptVerify.HasFlag(ScriptVerify.DiscourageUpgradableTaprootVersion))
+					{
+						return SetError(ScriptError.DiscourageUpgradableTaprootVersion);
+					}
+					return true;
+				}
+
+#else
+				// We can't support validation of taproot in .net framework
+				return SetError(ScriptError.DiscourageUpgradableWitnessProgram);
+#endif
+
 			}
 			else if ((ScriptVerify & ScriptVerify.DiscourageUpgradableWitnessProgram) != 0)
 			{
@@ -609,11 +728,113 @@ namespace NBitcoin
 				// Higher version witness scripts return true for future softfork compatibility
 				return true;
 			}
+		}
 
+#if HAS_SPAN
+		private bool VerifyTaprootCommitment(ReadOnlySpan<byte> control, ReadOnlySpan<byte> program, uint256 tapleafHash)
+		{
+			//! The internal pubkey (x-only, so no Y coordinate parity).
+			if (!TaprootInternalPubKey.TryCreate(control.Slice(1, 32), out var p))
+				return false;
+			//! The output pubkey (taken from the scriptPubKey).
+			if (!TaprootPubKey.TryCreate(program, out var q))
+				return false;
+			// Compute the Merkle root from the leaf and the provided path.
+			uint256 merkle_root = ComputeTaprootMerkleRoot(control, tapleafHash);
+			// Verify that the output pubkey matches the tweaked internal pubkey, after correcting for parity.
+			return q.CheckTapTweak(p, merkle_root, (control[0] & 1) != 0);
+		}
+
+		internal static uint256 ComputeTaprootMerkleRoot(ReadOnlySpan<byte> control, uint256 tapleafHash)
+		{
+			int path_len = (control.Length - TAPROOT_CONTROL_BASE_SIZE) / TAPROOT_CONTROL_NODE_SIZE;
+			uint256 k = tapleafHash;
+			Span<byte> buff = stackalloc byte[32];
+			for (int i = 0; i < path_len; i++)
+			{
+				using SHA256 sha = new SHA256();
+				sha.InitializeTagged("TapBranch");
+				var node = new uint256(control.Slice(TAPROOT_CONTROL_BASE_SIZE + TAPROOT_CONTROL_NODE_SIZE * i, TAPROOT_CONTROL_NODE_SIZE));
+				if (CompareLexicographic(k, node))
+				{
+					k.ToBytes(buff);
+					sha.Write(buff);
+					node.ToBytes(buff);
+					sha.Write(buff);
+				}
+				else
+				{
+					node.ToBytes(buff);
+					sha.Write(buff);
+					k.ToBytes(buff);
+					sha.Write(buff);
+				}
+				sha.GetHash(buff);
+				k = new uint256(buff);
+			}
+			return k;
+		}
+
+		static bool CompareLexicographic(uint256 a, uint256 b)
+		{
+			Span<byte> ab = stackalloc byte[32];
+			Span<byte> bb = stackalloc byte[32];
+			a.ToBytes(ab);
+			b.ToBytes(bb);
+			for (int i = 0; i < ab.Length && i < bb.Length; i++)
+			{
+				if (ab[i] < bb[i])
+					return true;
+				if (bb[i] < ab[i])
+					return false;
+			}
+			return true;
+		}
+
+		private uint256 ComputeTapleafHash(byte leaf_version, Script execScript)
+		{
+			var hash = new HashStream() { SingleSHA256 = true };
+			hash.InitializeTagged("TapLeaf");
+			hash.WriteByte(leaf_version);
+			var bs = new BitcoinStream(hash, true);
+			bs.ReadWrite(execScript);
+			return hash.GetHash();
+		}
+#endif
+		// Maximum number of values on script interpreter stack
+		const int MAX_STACK_SIZE = 1000;
+		private bool ExecuteWitnessScript(ContextStack<byte[]> stack, Script scriptPubKey, HashVersion sigversion, TransactionChecker checker)
+		{
 			var ctx = this.Clone();
 			ctx.Stack.Clear();
-			foreach (var item in stack)
+			foreach (var item in stack.Reverse())
 				ctx.Stack.Push(item);
+
+			if (sigversion == HashVersion.Tapscript)
+			{
+				// OP_SUCCESSx processing overrides everything, including stack element size limits
+				foreach (var op in scriptPubKey.ToOps())
+				{
+					var opcode = op.Code;
+					//if (op.PushData is null)
+					//{
+					//	// Note how this condition would not be reached if an unknown OP_SUCCESSx was found
+					//	return SetError(ScriptError.BadOpCode);
+					//}
+					// New opcodes will be listed here. May use a different sigversion to modify existing opcodes.
+					if (IsOpSuccess(opcode))
+					{
+						if (ScriptVerify.HasFlag(ScriptVerify.DiscourageOpSuccess))
+						{
+							return SetError(ScriptError.DiscourageOpSuccess);
+						}
+						return SetSuccess(ScriptError.OK);
+					}
+				}
+
+				// Tapscript enforces initial stack size limits (altstack is empty here)
+				if (stack.Count > MAX_STACK_SIZE) return SetError(ScriptError.StackSize);
+			}
 
 			// Disallow stack item size > MAX_SCRIPT_ELEMENT_SIZE in witness stack
 			for (int i = 0; i < ctx.Stack.Count; i++)
@@ -621,7 +842,7 @@ namespace NBitcoin
 				if (ctx.Stack.Top(-(i + 1)).Length > MAX_SCRIPT_ELEMENT_SIZE)
 					return SetError(ScriptError.PushSize);
 			}
-			if (!ctx.EvalScript(scriptPubKey, checker, 1))
+			if (!ctx.EvalScript(scriptPubKey, checker, sigversion))
 			{
 				return SetError(ctx.Error);
 			}
@@ -633,24 +854,25 @@ namespace NBitcoin
 			return true;
 		}
 
+		private bool IsOpSuccess(OpcodeType code)
+		{
+			var opcode = (byte)code;
+			return opcode == 80 || opcode == 98 || (opcode >= 126 && opcode <= 129) ||
+					(opcode >= 131 && opcode <= 134) || (opcode >= 137 && opcode <= 138) ||
+					(opcode >= 141 && opcode <= 142) || (opcode >= 149 && opcode <= 153) ||
+					(opcode >= 187 && opcode <= 254);
+		}
 
 		static readonly byte[] vchFalse = new byte[0];
 		static readonly byte[] vchZero = new byte[0];
 		static readonly byte[] vchTrue = new byte[] { 1 };
+		const int MAX_OPS_PER_SCRIPT = 201;
 
 		private const int MAX_SCRIPT_ELEMENT_SIZE = 520;
-
-		public bool EvalScript(Script s, Transaction txTo, int nIn)
+		const int MAX_SCRIPT_SIZE = 10000;
+		internal bool EvalScript(Script s, TransactionChecker checker, HashVersion hashversion)
 		{
-			return EvalScript(s, new TransactionChecker(txTo, nIn), 0);
-		}
-		public bool EvalScript(Script script, TransactionChecker checker, HashVersion hashVersion)
-		{
-			return EvalScript(script, checker, (int)hashVersion);
-		}
-		bool EvalScript(Script s, TransactionChecker checker, int hashversion)
-		{
-			if (s.Length > 10000)
+			if ((hashversion == HashVersion.Original || hashversion == HashVersion.WitnessV0) && s.Length > MAX_SCRIPT_SIZE)
 				return SetError(ScriptError.ScriptSize);
 
 			SetError(ScriptError.UnknownError);
@@ -660,7 +882,8 @@ namespace NBitcoin
 
 			var vfExec = new Stack<bool>();
 			var altstack = new ContextStack<byte[]>();
-
+			uint opcode_pos = 0xffffffff; // So the first opcode will bump it to 1
+			ExecutionData.CodeseparatorPosition = 0xFFFFFFFFU;
 			var nOpCount = 0;
 			var fRequireMinimal = (ScriptVerify & ScriptVerify.MinimalData) != 0;
 
@@ -669,15 +892,21 @@ namespace NBitcoin
 				Op opcode;
 				while ((opcode = script.Read()) != null)
 				{
+					++opcode_pos;
 					//
 					// Read instruction
 					//
 					if (opcode.PushData != null && opcode.PushData.Length > MAX_SCRIPT_ELEMENT_SIZE)
 						return SetError(ScriptError.PushSize);
 
-					// Note how OP_RESERVED does not count towards the opcode limit.
-					if (opcode.Code > OpcodeType.OP_16 && ++nOpCount > 201)
-						return SetError(ScriptError.OpCount);
+					if (hashversion == HashVersion.Original || hashversion == HashVersion.WitnessV0)
+					{
+						// Note how OP_RESERVED does not count towards the opcode limit.
+						if (opcode.Code > OpcodeType.OP_16 && ++nOpCount > MAX_OPS_PER_SCRIPT)
+						{
+							return SetError(ScriptError.OpCount);
+						}
+					}
 
 					if (opcode.Code == OpcodeType.OP_CAT ||
 						opcode.Code == OpcodeType.OP_SUBSTR ||
@@ -855,7 +1084,18 @@ namespace NBitcoin
 
 										var vch = _stack.Top(-1);
 
-										if (hashversion == (int)HashVersion.Witness && (ScriptVerify & ScriptVerify.MinimalIf) != 0)
+										// Tapscript requires minimal IF/NOTIF inputs as a consensus rule.
+										if (hashversion == HashVersion.Tapscript)
+										{
+											// The input argument to the OP_IF and OP_NOTIF opcodes must be either
+											// exactly 0 (the empty vector) or exactly 1 (the one-byte vector with value 1).
+											if (vch.Length > 1 || (vch.Length == 1 && vch[0] != 1))
+											{
+												return SetError(ScriptError.MinimalIf);
+											}
+										}
+										// Under witness v0 rules it is only a policy rule, enabled through SCRIPT_VERIFY_MINIMALIF.
+										if (hashversion == HashVersion.WitnessV0 && (ScriptVerify & ScriptVerify.MinimalIf) != 0)
 										{
 											if (vch.Length > 1)
 												return SetError(ScriptError.MinimalIf);
@@ -1306,7 +1546,7 @@ namespace NBitcoin
 									else if (opcode.Code == OpcodeType.OP_HASH160)
 										vchHash = Hashes.Hash160(vch, 0, vch.Length).ToBytes();
 									else if (opcode.Code == OpcodeType.OP_HASH256)
-										vchHash = Hashes.Hash256(vch, 0, vch.Length).ToBytes();
+										vchHash = Hashes.DoubleSHA256(vch, 0, vch.Length).ToBytes();
 									_stack.Pop();
 									_stack.Push(vchHash);
 									break;
@@ -1315,6 +1555,7 @@ namespace NBitcoin
 								{
 									// Hash starts after the code separator
 									pbegincodehash = (int)script.Inner.Position;
+									ExecutionData.CodeseparatorPosition = opcode_pos;
 									break;
 								}
 							case OpcodeType.OP_CHECKSIG:
@@ -1326,26 +1567,9 @@ namespace NBitcoin
 
 									var vchSig = _stack.Top(-2);
 									var vchPubKey = _stack.Top(-1);
+									bool fSuccess = true;
 
-									////// debug print
-									//PrintHex(vchSig.begin(), vchSig.end(), "sig: %s\n");
-									//PrintHex(vchPubKey.begin(), vchPubKey.end(), "pubkey: %s\n");
-
-									// Subset of script starting at the most recent codeseparator
-									var scriptCode = new Script(s._Script.Skip(pbegincodehash).ToArray());
-									// Drop the signature, since there's no way for a signature to sign itself
-									if (hashversion == (int)HashVersion.Original)
-										scriptCode = scriptCode.FindAndDelete(vchSig);
-
-									if (!CheckSignatureEncoding(vchSig) || !CheckPubKeyEncoding(vchPubKey, hashversion))
-									{
-										//serror is set
-										return false;
-									}
-
-									bool fSuccess = CheckSig(vchSig, vchPubKey, scriptCode, checker, hashversion);
-									if (!fSuccess && (ScriptVerify & ScriptVerify.NullFail) != 0 && vchSig.Length != 0)
-										return SetError(ScriptError.NullFail);
+									if (!EvalChecksig(vchSig, vchPubKey, s, pbegincodehash, checker, hashversion, out fSuccess)) return false;
 
 									_stack.Pop();
 									_stack.Pop();
@@ -1359,6 +1583,28 @@ namespace NBitcoin
 									}
 									break;
 								}
+#if HAS_SPAN
+							case OpcodeType.OP_CHECKSIGADD:
+								{
+									// OP_CHECKSIGADD is only available in Tapscript
+									if (hashversion == HashVersion.Original || hashversion == HashVersion.WitnessV0) return SetError(ScriptError.BadOpCode);
+
+									// (sig num pubkey -- num)
+									if (_stack.Count < 3) return SetError(ScriptError.InvalidStackOperation);
+
+									var sig = _stack.Top(-3);
+									CScriptNum num = new CScriptNum(_stack.Top(-2), fRequireMinimal);
+									var pubkey = _stack.Top(-1);
+
+									bool success = true;
+									if (!EvalChecksigTapscript(sig, pubkey, checker, hashversion, out success)) return false;
+									_stack.Pop();
+									_stack.Pop();
+									_stack.Pop();
+									_stack.Push((num + (success ? 1 : 0)).getvch());
+									break;
+								}
+#endif
 							case OpcodeType.OP_CHECKMULTISIG:
 							case OpcodeType.OP_CHECKMULTISIGVERIFY:
 								{
@@ -1490,7 +1736,86 @@ namespace NBitcoin
 
 			return SetSuccess(ScriptError.OK);
 		}
+		const long VALIDATION_WEIGHT_PER_SIGOP_PASSED = 50;
 
+		private bool EvalChecksig(byte[] sig, byte[] pubkey, Script s, int pbegincodehash, TransactionChecker checker, HashVersion sigversion, out bool success)
+		{
+			switch	(sigversion)
+			{
+				case HashVersion.Original:
+				case HashVersion.WitnessV0:
+					return EvalChecksigPreTapscript(sig, pubkey, s, pbegincodehash, checker, sigversion, out success);
+#if HAS_SPAN
+				case HashVersion.Tapscript:
+					return EvalChecksigTapscript(sig, pubkey, checker, sigversion, out success);
+#endif
+				default:
+					throw new NotSupportedException("NBitcoin bug 29174: Contact NBitcoin developers, this should never happen");
+			}
+		}
+
+		private bool EvalChecksigPreTapscript(byte[] vchSig, byte[] vchPubKey, Script s, int pbegincodehash, TransactionChecker checker, HashVersion sigversion, out bool success)
+		{
+			success = true;
+			// Subset of script starting at the most recent codeseparator
+			var scriptCode = new Script(s._Script.Skip(pbegincodehash).ToArray());
+			// Drop the signature, since there's no way for a signature to sign itself
+			if (sigversion == (int)HashVersion.Original)
+				scriptCode = scriptCode.FindAndDelete(vchSig);
+
+			if (!CheckSignatureEncoding(vchSig) || !CheckPubKeyEncoding(vchPubKey, sigversion))
+			{
+				//serror is set
+				return false;
+			}
+
+			success = CheckSig(vchSig, vchPubKey, scriptCode, checker, sigversion);
+			if (!success && (ScriptVerify & ScriptVerify.NullFail) != 0 && vchSig.Length != 0)
+				return SetError(ScriptError.NullFail);
+
+			return true;
+		}
+#if HAS_SPAN
+		private bool EvalChecksigTapscript(byte[] sig, byte[] pubkey, TransactionChecker checker, HashVersion sigversion, out bool success)
+		{
+			/*
+     *  The following validation sequence is consensus critical. Please note how --
+     *    upgradable public key versions precede other rules;
+     *    the script execution fails when using empty signature with invalid public key;
+     *    the script execution fails when using non-empty invalid signature.
+     */
+			success = !(sig.Length is 0);
+			if (success)
+			{
+				// Implement the sigops/witnesssize ratio test.
+				// Passing with an upgradable public key version is also counted.
+				ExecutionData.ValidationWeightLeft -= VALIDATION_WEIGHT_PER_SIGOP_PASSED;
+				if (ExecutionData.ValidationWeightLeft < 0)
+					return SetError(ScriptError.TapscriptValidationWeight);
+			}
+
+			if (pubkey.Length is 0)
+				return SetError(ScriptError.PubKeyType);
+			else if (pubkey.Length is 32)
+			{
+				if (success && !checker.CheckSchnorrSignature(sig, pubkey, sigversion, ExecutionData, out var err))
+					return SetError(err);
+			}
+			else
+			{
+				/*
+	*  New public key version softforks should be defined before this `else` block.
+	*  Generally, the new code should not do anything but failing the script execution. To avoid
+	*  consensus bugs, it should not modify any existing values (including `success`).
+	*/
+				if (ScriptVerify.HasFlag(ScriptVerify.DiscourageUpgradablePubKeyType))
+				{
+					return SetError(ScriptError.DiscourageUpgradablePubKeyType);
+				}
+			}
+			return true;
+		}
+#endif
 		bool CheckSequence(CScriptNum nSequence, TransactionChecker checker)
 		{
 			var txTo = checker.Transaction;
@@ -1648,14 +1973,14 @@ namespace NBitcoin
 			return true;
 		}
 
-		private bool CheckPubKeyEncoding(byte[] vchPubKey, int sigversion)
+		private bool CheckPubKeyEncoding(byte[] vchPubKey, HashVersion sigversion)
 		{
 			if ((ScriptVerify & ScriptVerify.StrictEnc) != 0 && !IsCompressedOrUncompressedPubKey(vchPubKey))
 			{
 				Error = ScriptError.PubKeyType;
 				return false;
 			}
-			if ((ScriptVerify & ScriptVerify.WitnessPubkeyType) != 0 && sigversion == (int)HashVersion.Witness && !IsCompressedPubKey(vchPubKey))
+			if ((ScriptVerify & ScriptVerify.WitnessPubkeyType) != 0 && sigversion == HashVersion.WitnessV0 && !IsCompressedPubKey(vchPubKey))
 			{
 				return SetError(ScriptError.WitnessPubkeyType);
 			}
@@ -1917,27 +2242,7 @@ namespace NBitcoin
 				return _SignedHashes;
 			}
 		}
-
-
-		public bool CheckSig(TransactionSignature signature, PubKey pubKey, Script scriptPubKey, IndexedTxIn txIn)
-		{
-			return CheckSig(signature, pubKey, scriptPubKey, txIn.Transaction, txIn.Index);
-		}
-		public bool CheckSig(TransactionSignature signature, PubKey pubKey, Script scriptPubKey, Transaction txTo, uint nIn)
-		{
-			return CheckSig(signature.ToBytes(), pubKey.ToBytes(), scriptPubKey, txTo, (int)nIn);
-		}
-
-		public bool CheckSig(TransactionSignature signature, PubKey pubKey, Script scriptPubKey, TransactionChecker checker, HashVersion hashVersion)
-		{
-			return CheckSig(signature.ToBytes(), pubKey.ToBytes(), scriptPubKey, checker, (int)hashVersion);
-		}
-
-		public bool CheckSig(byte[] vchSig, byte[] vchPubKey, Script scriptCode, Transaction txTo, int nIn)
-			=> CheckSig(vchSig, vchPubKey, scriptCode, txTo, nIn, 0, null);
-		public bool CheckSig(byte[] vchSig, byte[] vchPubKey, Script scriptCode, Transaction txTo, int nIn, int sigVersion = 0, TxOut spentOutput = null)
-			=> CheckSig(vchSig, vchPubKey, scriptCode, new TransactionChecker(txTo, nIn, spentOutput), sigVersion);
-		bool CheckSig(byte[] vchSig, byte[] vchPubKey, Script scriptCode, TransactionChecker checker, int sigversion)
+		private bool CheckSig(byte[] vchSig, byte[] vchPubKey, Script scriptCode, TransactionChecker checker, HashVersion sigversion)
 		{
 			PubKey pubkey = null;
 			try
@@ -1966,9 +2271,6 @@ namespace NBitcoin
 				return false;
 			}
 
-			if (!IsAllowedSignature(scriptSig.SigHash))
-				return false;
-
 			uint256 sighash = checker.Transaction.GetSignatureHash(scriptCode, checker.Index, scriptSig.SigHash, checker.SpentOutput, (HashVersion)sigversion, checker.PrecomputedTransactionData);
 			_SignedHashes.Add(new SignedHash()
 			{
@@ -1981,8 +2283,11 @@ namespace NBitcoin
 			{
 				if ((ScriptVerify & ScriptVerify.StrictEnc) != 0)
 					return false;
-
+#if HAS_SPAN
+				return false;
+#else
 				//Replicate OpenSSL bug on 23b397edccd3740a74adb603c9756370fafcde9bcc4483eb271ecad09a94dd63 (http://r6.ca/blog/20111119T211504Z.html)
+#pragma warning disable 618
 				var nLenR = vchSig[3];
 				var nLenS = vchSig[5 + nLenR];
 				var R = 4;
@@ -1995,25 +2300,17 @@ namespace NBitcoin
 					if (!pubkey.Verify(sighash, sig2))
 						return false;
 				}
+#pragma warning restore 618
+#endif
 			}
 
 			return true;
 		}
 
-
-		public bool IsAllowedSignature(SigHash sigHash)
-		{
-			if (SigHash == NBitcoin.SigHash.Undefined)
-				return true;
-			return SigHash == sigHash;
-		}
-
-
 		private void Load(ScriptEvaluationContext other)
 		{
 			_stack = new ContextStack<byte[]>(other._stack);
 			ScriptVerify = other.ScriptVerify;
-			SigHash = other.SigHash;
 		}
 
 		public ScriptEvaluationContext Clone()
@@ -2022,8 +2319,9 @@ namespace NBitcoin
 			{
 				_stack = new ContextStack<byte[]>(_stack),
 				ScriptVerify = ScriptVerify,
-				SigHash = SigHash,
-				_SignedHashes = _SignedHashes
+				_SignedHashes = _SignedHashes,
+				ExecutionData = ExecutionData,
+				Error = Error,
 			};
 		}
 
@@ -2077,6 +2375,12 @@ namespace NBitcoin
 			stack._array.CopyTo(_array, 0);
 		}
 
+		public ContextStack(IEnumerable<T> elements) : this()
+		{
+			foreach (var el in elements)
+				Push(el);
+		}
+
 		/// <summary>
 		/// Gets the number of items in the stack.
 		/// </summary>
@@ -2127,7 +2431,7 @@ namespace NBitcoin
 		/// <exception cref="System.IndexOutOfRangeException">topIndex</exception>
 		public T Top(int i)
 		{
-			if (i > 0 || -i > Count)
+			if (i >= 0 || -i > Count)
 				throw new IndexOutOfRangeException("topIndex");
 			return _array[Count + i];
 		}
@@ -2142,9 +2446,9 @@ namespace NBitcoin
 		/// </exception>
 		public void Swap(int i, int j)
 		{
-			if (i > 0 || -i > Count)
+			if (i >= 0 || -i > Count)
 				throw new IndexOutOfRangeException("i");
-			if (i > 0 || -j > Count)
+			if (j >= 0 || -j > Count)
 				throw new IndexOutOfRangeException("j");
 
 			var t = _array[Count + i];

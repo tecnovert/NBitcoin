@@ -1,5 +1,4 @@
-﻿using NBitcoin.BouncyCastle.Math;
-using NBitcoin.Protocol;
+﻿using NBitcoin.Protocol;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -289,7 +288,11 @@ namespace NBitcoin.Tests
 			foreach (var history in histories)
 			{
 				var height = int.Parse(history.Split(',')[0]);
+#if NO_NATIVE_BIGNUM
 				var expectedTarget = new Target(new BouncyCastle.Math.BigInteger(history.Split(',')[1], 10));
+#else
+				var expectedTarget = new Target(System.Numerics.BigInteger.Parse(history.Split(',')[1]));
+#endif
 
 				var block = main.GetBlock(height).Header;
 
@@ -308,6 +311,24 @@ namespace NBitcoin.Tests
 			{
 				Assert.True(h.Validate(Network.Main));
 			}
+		}
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void CanCreateBigSlimChain()
+		{
+			var main = new ConcurrentChain(LoadMainChain(), Network.Main);
+			var c = new SlimChain(main.GetBlock(0).HashBlock);
+			foreach (var item in main.EnumerateToTip(main.GetBlock(0).HashBlock))
+			{
+				c.TrySetTip(item.HashBlock, item.Previous?.HashBlock);
+			}
+			Assert.Equal(main.Height, c.Height);
+			Assert.Equal(main.Tip.HashBlock, c.Tip);
+			// Can up the capacity without errors
+			c.SetCapacity(main.Height + 3000);
+			Assert.Equal(main.Height, c.Height);
+			Assert.Equal(main.Tip.HashBlock, c.Tip);
+			Assert.Equal(main.GetBlock(main.Tip.HashBlock).HashBlock, c.GetBlock(c.Tip).Hash);
 		}
 
 		[Fact]

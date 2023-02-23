@@ -57,6 +57,7 @@ namespace NBitcoin.Tests
 		}
 
 		[Fact]
+		[Trait("UnitTest", "UnitTest")]
 		public void CanSortuin256()
 		{
 			SortedDictionary<uint256, uint256> values = new SortedDictionary<uint256, uint256>();
@@ -66,13 +67,13 @@ namespace NBitcoin.Tests
 			Assert.Equal(uint256.One, values.Skip(1).First().Key);
 			Assert.Equal(-1, ((IComparable<uint256>)uint256.Zero).CompareTo(uint256.One));
 			Assert.Equal(1, ((IComparable<uint256>)uint256.One).CompareTo(uint256.Zero));
-			Assert.Equal(1, ((IComparable)uint256.One).CompareTo(null as object));
-			Assert.Equal(1, ((IComparable)uint256.Zero).CompareTo(null as object));
+			Assert.Equal(1, ((IComparable)uint256.One).CompareTo(null));
+			Assert.Equal(1, ((IComparable)uint256.Zero).CompareTo(null));
 
-			Assert.True((null as uint256) < uint256.Zero);
-			Assert.True(uint256.Zero > (null as uint256));
-			Assert.True((null as uint256) >= (null as uint256));
-			Assert.True((null as uint256) == (null as uint256));
+			Assert.True(null < uint256.Zero);
+			Assert.True(uint256.Zero > null);
+			Assert.True(null >= (null as uint256));
+			Assert.True(null == (null as uint256));
 
 			SortedDictionary<uint160, uint160> values2 = new SortedDictionary<uint160, uint160>();
 			values2.Add(uint160.Zero, uint160.Zero);
@@ -82,16 +83,26 @@ namespace NBitcoin.Tests
 
 			Assert.Equal(-1, ((IComparable<uint160>)uint160.Zero).CompareTo(uint160.One));
 			Assert.Equal(1, ((IComparable<uint160>)uint160.One).CompareTo(uint160.Zero));
-			Assert.Equal(1, ((IComparable)uint160.One).CompareTo(null as object));
-			Assert.Equal(1, ((IComparable)uint160.Zero).CompareTo(null as object));
+			Assert.Equal(1, ((IComparable)uint160.One).CompareTo(null));
+			Assert.Equal(1, ((IComparable)uint160.Zero).CompareTo(null));
 
-			Assert.True((null as uint160) < uint160.Zero);
-			Assert.True(uint160.Zero > (null as uint160));
-			Assert.True((null as uint160) >= (null as uint160));
-			Assert.True((null as uint160) == (null as uint160));
+			Assert.True(null < uint160.Zero);
+			Assert.True(uint160.Zero > null);
+			Assert.True(null >= (null as uint160));
+			Assert.True(null == (null as uint160));
 		}
 
 		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void chainNameTests()
+		{
+			Assert.Equal(new ChainName("lol"), new ChainName("Lol"));
+			Assert.Equal(new ChainName("lol"), new ChainName("LoL"));
+			Assert.Equal("Lol", new ChainName("LoL").ToString());
+		}
+
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
 		public void spanUintSerializationTests()
 		{
 			var v = new uint256(RandomUtils.GetBytes(32));
@@ -100,6 +111,38 @@ namespace NBitcoin.Tests
 			uint256.MutableUint256 mutable = new uint256.MutableUint256();
 			mutable.ReadWrite(v.ToBytes(), Network.Main);
 			Assert.Equal(v, mutable.Value);
+		}
+
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void uitnSerializationTests2()
+		{
+			var v = new uint256("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
+			var vr = new uint256("201f1e1d1c1b1a191817161514131211100f0e0d0c0b0a090807060504030201");
+			var bytes = v.ToBytes();
+			Assert.Equal(0x20, bytes[0]);
+			Assert.Equal(0x01, bytes[31]);
+
+			var v2 = new uint256(bytes);
+			Assert.Equal(v, v2);
+
+			Assert.Equal("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20", v2.ToString());
+
+			var bytes2 = new byte[32];
+			v2.ToBytes(bytes2);
+			var v3 = new uint256(bytes2, 0, 32);
+			Assert.Equal(v2, v3);
+
+			Assert.Equal(vr, new uint256(v.ToBytes(false)));
+			v.ToBytes(bytes, false);
+			Assert.Equal(vr, new uint256(bytes));
+
+			v.ToBytes(bytes);
+			Assert.Equal(vr, new uint256(bytes, false));
+
+			Assert.Equal(v, new uint256(Enumerable.Range(0, 32).Select(i => v.GetByte(i)).ToArray()));
+			Assert.Equal(0x1d1e1f20U, v.GetLow32());
+			Assert.Equal(0x191a1b1c1d1e1f20U, v.GetLow64());
 		}
 
 		[Fact]

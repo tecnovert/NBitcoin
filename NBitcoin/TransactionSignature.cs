@@ -4,9 +4,15 @@ using System;
 
 namespace NBitcoin
 {
-	public class TransactionSignature
+	public class TransactionSignature : ITransactionSignature
 	{
+#if HAS_SPAN
+		static readonly TransactionSignature _Empty = new TransactionSignature(new ECDSASignature(Secp256k1.Scalar.Zero, Secp256k1.Scalar.Zero), SigHash.All);
+#else
+#pragma warning disable 618
 		static readonly TransactionSignature _Empty = new TransactionSignature(new ECDSASignature(NBitcoin.BouncyCastle.Math.BigInteger.ValueOf(0), NBitcoin.BouncyCastle.Math.BigInteger.ValueOf(0)), SigHash.All);
+#pragma warning restore 618
+#endif
 		public static TransactionSignature Empty
 		{
 			get
@@ -58,8 +64,8 @@ namespace NBitcoin
 		}
 		public TransactionSignature(ECDSASignature signature, SigHash sigHash)
 		{
-			if (sigHash == SigHash.Undefined)
-				throw new ArgumentException("sigHash should not be Undefined");
+			if (signature == null)
+				throw new ArgumentNullException(nameof(signature));
 			_SigHash = sigHash;
 			_Signature = signature;
 		}
@@ -108,20 +114,6 @@ namespace NBitcoin
 		public static bool ValidLength(int length)
 		{
 			return (67 <= length && length <= 80) || length == 9; //9 = Empty signature
-		}
-
-		public bool Check(PubKey pubKey, Script scriptPubKey, IndexedTxIn txIn, ScriptVerify verify = ScriptVerify.Standard)
-		{
-			return Check(pubKey, scriptPubKey, txIn.Transaction, txIn.Index, verify);
-		}
-
-		public bool Check(PubKey pubKey, Script scriptPubKey, Transaction tx, uint nIndex, ScriptVerify verify = ScriptVerify.Standard)
-		{
-			return new ScriptEvaluationContext()
-			{
-				ScriptVerify = verify,
-				SigHash = SigHash
-			}.CheckSig(this, pubKey, scriptPubKey, tx, nIndex);
 		}
 
 		string _Id;

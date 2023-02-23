@@ -19,7 +19,24 @@ namespace NBitcoin.DataEncoders
 			get; internal set;
 		}
 	}
-	public class Bech32Encoder : DataEncoder
+	public class Bech32EncodingType
+	{
+		static Bech32EncodingType()
+		{
+			BECH32 = new Bech32EncodingType(1);
+			BECH32M = new Bech32EncodingType(0x2bc830a3);
+			All = new Bech32EncodingType[] { BECH32, BECH32M };
+		}
+		public readonly static Bech32EncodingType BECH32;
+		public readonly static Bech32EncodingType BECH32M;
+		public readonly static Bech32EncodingType[] All;
+		public Bech32EncodingType(int encodingConstant)
+		{
+			EncodingConstant = encodingConstant;
+		}
+		public int EncodingConstant { get; }
+	}
+	public class Bech32Encoder
 	{
 
 		readonly static int[] GF1024_EXP = new int[] {
@@ -168,7 +185,11 @@ namespace NBitcoin.DataEncoders
 		  452, 710, 552, 128, 612, 600, 275, 322, 193
 		};
 
-		protected readonly byte[] Byteset = Encoders.ASCII.DecodeData("qpzry9x8gf2tvdw0s3jn54khce6mua7l");
+		protected static readonly byte[] Byteset;
+		static Bech32Encoder()
+		{
+			Byteset = Encoders.ASCII.DecodeData("qpzry9x8gf2tvdw0s3jn54khce6mua7l");
+		}
 		private static readonly uint[] Generator = { 0x3b6a57b2U, 0x26508e6dU, 0x1ea119faU, 0x3d4233ddU, 0x2a1462b3U };
 
 
@@ -261,7 +282,7 @@ namespace NBitcoin.DataEncoders
 			return new int[0];
 		}
 
-		internal Bech32Encoder(string hrp) : this(hrp == null ? null : Encoders.ASCII.DecodeData(hrp))
+		internal Bech32Encoder(string hrp) : this(hrp == null ? null : Encoders.ASCII.DecodeData(hrp.ToLowerInvariant()))
 		{
 		}
 		public Bech32Encoder(byte[] hrp)
@@ -289,31 +310,59 @@ namespace NBitcoin.DataEncoders
 			}
 		}
 
+#if HAS_SPAN
+		private static uint Polymod(ReadOnlySpan<byte> values)
+#else
 		private static uint Polymod(byte[] values)
+#endif
 		{
 			uint chk = 1;
-			foreach (var value in values)
+			for (int i = 0; i < values.Length; i++)
 			{
 				var top = chk >> 25;
-				chk = value ^ ((chk & 0x1ffffff) << 5);
-				foreach (var i in Enumerable.Range(0, 5))
-				{
-					chk ^= ((top >> i) & 1) == 1 ? Generator[i] : 0;
-				}
+				chk = values[i] ^ ((chk & 0x1ffffff) << 5);
+				chk ^= ((top >> 0) & 1) == 1 ? Generator[0] : 0;
+				chk ^= ((top >> 1) & 1) == 1 ? Generator[1] : 0;
+				chk ^= ((top >> 2) & 1) == 1 ? Generator[2] : 0;
+				chk ^= ((top >> 3) & 1) == 1 ? Generator[3] : 0;
+				chk ^= ((top >> 4) & 1) == 1 ? Generator[4] : 0;
 			}
 			return chk;
 		}
-
-		protected virtual bool VerifyChecksum(byte[] data, int bechStringLen, out int[] errorPosition)
+#if HAS_SPAN
+		protected virtual bool VerifyChecksum(byte[] data, int bechStringLen, out Bech32EncodingType encodingType, out int[] errorPosition)
+		{
+			return VerifyChecksum(data.AsSpan(), bechStringLen, out encodingType, out errorPosition);
+		}
+		protected virtual bool VerifyChecksum(ReadOnlySpan<byte> data, int bechStringLen, out Bech32EncodingType encodingType, out int[] errorPosition)
+#else
+		protected virtual bool VerifyChecksum(byte[] data, int bechStringLen, out Bech32EncodingType encodingType, out int[] errorPosition)
+#endif
 		{
 			errorPosition = null;
+#if HAS_SPAN
+			Span<byte> values = _HrpExpand.Length + data.Length is int v && v > 256 ? new byte[v] : stackalloc byte[v];
+			_HrpExpand.CopyTo(values);
+			data.CopyTo(values.Slice(_HrpExpand.Length));
+#else
 			var values = _HrpExpand.Concat(data);
-			var polymod = Polymod(values) ^ 1;
-			if (polymod != 0)
+#endif
+			var polymod = Polymod(values);
+			if (polymod == Bech32EncodingType.BECH32.EncodingConstant)
+				encodingType = Bech32EncodingType.BECH32;
+			else if (polymod == Bech32EncodingType.BECH32M.EncodingConstant)
+				encodingType = Bech32EncodingType.BECH32M;
+			else
 			{
-				var epos = locate_errors(polymod, bechStringLen - 1);
+				encodingType = null;
+
+				var epos = Bech32EncodingType.All
+											.Select(e => locate_errors(polymod ^ (uint)e.EncodingConstant, bechStringLen - 1))
+											.Where(e => e.Length != 0)
+											.OrderByDescending(e => e.Length)
+											.FirstOrDefault();
 				errorPosition = epos;
-				if (epos.Length == 0)
+				if (epos is null || epos.Length == 0)
 					return false;
 				for (var ep = 0; ep < epos.Length; ++ep)
 				{
@@ -324,38 +373,88 @@ namespace NBitcoin.DataEncoders
 			return true;
 		}
 
-		private byte[] CreateChecksum(byte[] data, int offset, int count)
+#if HAS_SPAN
+		private void CreateChecksum(ReadOnlySpan<byte> data, Bech32EncodingType encodingType, Span<byte> ret)
+#else
+		private byte[] CreateChecksum(byte[] data, int offset, int count, Bech32EncodingType encodingType)
+#endif
 		{
+#if HAS_SPAN
+			Span<byte> values = _HrpExpand.Length + data.Length + 6 is int v && v > 256 ? new byte[v] :
+																	  stackalloc byte[v];
+#else
 			var values = new byte[_HrpExpand.Length + count + 6];
+#endif
 			var valuesOffset = 0;
+#if HAS_SPAN
+			_HrpExpand.AsSpan().CopyTo(values.Slice(valuesOffset));
+#else
 			Array.Copy(_HrpExpand, 0, values, valuesOffset, _HrpExpand.Length);
+#endif
 			valuesOffset += _HrpExpand.Length;
+#if HAS_SPAN
+			data.CopyTo(values.Slice(valuesOffset));
+#else
 			Array.Copy(data, offset, values, valuesOffset, count);
-			valuesOffset += count;
-			var polymod = Polymod(values) ^ 1;
+#endif
+			valuesOffset += data.Length;
+			var polymod = Polymod(values) ^ encodingType.EncodingConstant;
+#if !HAS_SPAN
 			var ret = new byte[6];
+#endif
 			foreach (var i in Enumerable.Range(0, 6))
 			{
 				ret[i] = (byte)((polymod >> 5 * (5 - i)) & 31);
 			}
+#if !HAS_SPAN
 			return ret;
+#endif
 		}
 
-
-		public override string EncodeData(byte[] data, int offset, int count)
+#if !HAS_SPAN
+		public virtual string EncodeData(byte[] data, int offset, int count, Bech32EncodingType encodingType)
+#else
+		public virtual string EncodeData(ReadOnlySpan<byte> data, Bech32EncodingType encodingType)
+#endif
 		{
+			if (encodingType == null)
+				throw new ArgumentNullException(nameof(encodingType));
+#if HAS_SPAN
+			Span<byte> combined = _Hrp.Length + 1 + data.Length + 6 is int v && v > 256 ? new byte[v] :
+																	  stackalloc byte[v];
+#else
 			var combined = new byte[_Hrp.Length + 1 + count + 6];
+#endif
 			int combinedOffset = 0;
+#if HAS_SPAN
+			_Hrp.CopyTo(combined);
+#else
 			Array.Copy(_Hrp, 0, combined, 0, _Hrp.Length);
+#endif
 			combinedOffset += _Hrp.Length;
 			combined[combinedOffset] = 49;
 			combinedOffset++;
+#if HAS_SPAN
+			data.CopyTo(combined.Slice(combinedOffset));
+#else
 			Array.Copy(data, offset, combined, combinedOffset, count);
-			combinedOffset += count;
-			var checkSum = CreateChecksum(data, offset, count);
+#endif
+			combinedOffset += data.Length;
+#if HAS_SPAN
+			Span<byte> checkSum = stackalloc byte[6];
+			CreateChecksum(data, encodingType, checkSum);
+#else
+			var checkSum = CreateChecksum(data, offset, count, encodingType);
+#endif
+#if HAS_SPAN
+			checkSum.CopyTo(combined.Slice(combinedOffset, 6));
+			combinedOffset += 6;
+			for (int i = 0; i < data.Length + 6; i++)
+#else
 			Array.Copy(checkSum, 0, combined, combinedOffset, 6);
 			combinedOffset += 6;
 			for (int i = 0; i < count + 6; i++)
+#endif
 			{
 				combined[_Hrp.Length + 1 + i] = Byteset[combined[_Hrp.Length + 1 + i]];
 			}
@@ -364,75 +463,107 @@ namespace NBitcoin.DataEncoders
 
 		public static Bech32Encoder ExtractEncoderFromString(string test)
 		{
-			var i = test.IndexOf('1');
+			var i = test.LastIndexOf('1');
 			if (i == -1)
 				throw new FormatException("Invalid Bech32 string");
+
 			return Encoders.Bech32(test.Substring(0, i));
 		}
 
 		protected virtual void CheckCase(string hrp)
 		{
-			if (hrp.ToLowerInvariant().Equals(hrp))
+			if (hrp.Length is 0)
 				return;
-			if (hrp.ToUpperInvariant().Equals(hrp))
-				return;
-			throw new FormatException("Invalid bech32 string, mixed case detected");
+			bool isLowercase = char.IsUpper(hrp[0]);
+			for (int i = 1; i < hrp.Length; i++)
+			{
+				if (isLowercase != char.IsUpper(hrp[i]) && !char.IsDigit(hrp[i]))
+					throw new FormatException("Invalid bech32 string, mixed case detected");
+			}
 		}
-		public override byte[] DecodeData(string encoded)
+		public byte[] DecodeDataRaw(string encoded, out Bech32EncodingType encodingType)
 		{
-			throw new NotSupportedException();
+			return DecodeDataCore(encoded, out encodingType);
 		}
-		protected virtual byte[] DecodeDataCore(string encoded)
+		public bool StrictLength { get; set; } = true;
+		protected virtual byte[] DecodeDataCore(string encoded, out Bech32EncodingType encodingType)
 		{
 			if (encoded == null)
 				throw new ArgumentNullException(nameof(encoded));
 			CheckCase(encoded);
-			var buffer = Encoders.ASCII.DecodeData(encoded);
-			if (buffer.Any(b => b < 33 || b > 126))
-			{
-				throw new FormatException("bech chars are out of range");
-			}
 			encoded = encoded.ToLowerInvariant();
-			buffer = Encoders.ASCII.DecodeData(encoded);
+#if HAS_SPAN
+			Span<byte> buffer = encoded.Length is int v && v > 256 ? new byte[v] : stackalloc byte[v];
+			((ASCIIEncoder)Encoders.ASCII).DecodeData(encoded, buffer);
+#else
+			var buffer = Encoders.ASCII.DecodeData(encoded);
+#endif
 			var pos = encoded.LastIndexOf("1", StringComparison.OrdinalIgnoreCase);
-			if (pos < 1 || pos + 7 > encoded.Length || encoded.Length > 90)
+			if (pos < 1)
 			{
-				throw new FormatException("bech missing separator, separator misplaced or too long input");
+				throw new FormatException("The Bech32 string is missing separator '1'");
 			}
-			if (buffer.Skip(pos + 1).Any(x => !Byteset.Contains(x)))
+			else if (pos + 7 > encoded.Length)
 			{
-				throw new FormatException("bech chars are out of range");
+				throw new FormatException("The Bech32 string is too short");
 			}
-
-			buffer = Encoders.ASCII.DecodeData(encoded);
-			var hrp = Encoders.ASCII.DecodeData(encoded.Substring(0, pos));
-			if (!hrp.SequenceEqual(_Hrp))
+			else if (StrictLength && encoded.Length > 90)
+			{
+				throw new FormatException("The Bech32 string is too long");
+			}
+			if (pos != _Hrp.Length)
 			{
 				throw new FormatException("Mismatching human readable part");
 			}
+
+			for (int i = 0; i < _Hrp.Length; i++)
+			{
+				if (buffer[i] != _Hrp[i])
+					throw new FormatException("Mismatching human readable part");
+			}
+#if HAS_SPAN
+			Span<byte> data = encoded.Length - pos - 1 is int v2 && v2 > 256 ? new byte[v2] : stackalloc byte[v2];
+#else
 			var data = new byte[encoded.Length - pos - 1];
+#endif
 			for (int j = 0, i = pos + 1; i < encoded.Length; i++, j++)
 			{
-				data[j] = (byte)Array.IndexOf(Byteset, buffer[i]);
+				int index = Array.IndexOf(Byteset, buffer[i]);
+				if (index == -1)
+					throw new FormatException("bech chars are out of range");
+				data[j] = (byte)index;
 			}
 
 			int[] error;
-			if (!VerifyChecksum(data, encoded.Length, out error))
+			if (!VerifyChecksum(data, encoded.Length, out encodingType, out error))
 			{
-				if (error.Length == 0)
+				if (error == null || error.Length == 0)
 					throw new FormatException("Error while verifying Bech32 checksum");
 				else
 					throw new Bech32FormatException($"Error in Bech32 string at {String.Join(",", error)}", error);
 			}
+#if HAS_SPAN
+			return data.Slice(0, data.Length - 6).ToArray();
+#else
 			return data.Take(data.Length - 6).ToArray();
+#endif
 		}
-
+#if HAS_SPAN
+		// We don't use this one, but old version of NBitcoin.Altcoins does, we prefer not causing problems if there is a mismatch of
+		// assembly between NBitcoin.Altcoins and NBitcoin.
 		protected virtual byte[] ConvertBits(IEnumerable<byte> data, int fromBits, int toBits, bool pad = true)
+		{
+			return ConvertBits(data.ToArray().AsSpan(), fromBits, toBits, pad);
+		}
+		protected virtual byte[] ConvertBits(ReadOnlySpan<byte> data, int fromBits, int toBits, bool pad = true)
+#else
+		protected virtual byte[] ConvertBits(IEnumerable<byte> data, int fromBits, int toBits, bool pad = true)
+#endif
 		{
 			var acc = 0;
 			var bits = 0;
 			var maxv = (1 << toBits) - 1;
-			var ret = new List<byte>();
+			var ret = new List<byte>(64);
 			foreach (var value in data)
 			{
 				if ((value >> fromBits) > 0)
@@ -464,13 +595,19 @@ namespace NBitcoin.DataEncoders
 			if (addr == null)
 				throw new ArgumentNullException(nameof(addr));
 			CheckCase(addr);
-			var data = DecodeDataCore(addr);
-
+			var data = DecodeDataCore(addr, out var encodingType);
+#if HAS_SPAN
+			var decoded = ConvertBits(data.AsSpan().Slice(1), 5, 8, false);
+#else
 			var decoded = ConvertBits(data.Skip(1), 5, 8, false);
+#endif
 			if (decoded.Length < 2 || decoded.Length > 40)
 				throw new FormatException("Invalid decoded data length");
-
 			witnessVerion = data[0];
+			if (witnessVerion == 0 && encodingType != Bech32EncodingType.BECH32)
+				throw new FormatException("Decoded data should have used BECH32 encoding");
+			if (witnessVerion != 0 && encodingType != Bech32EncodingType.BECH32M)
+				throw new FormatException("Decoded data should have used BECH32M encoding");
 			if (witnessVerion > 16)
 				throw new FormatException("Invalid decoded witness version");
 
@@ -479,11 +616,49 @@ namespace NBitcoin.DataEncoders
 			return decoded;
 		}
 
+#if HAS_SPAN
+		public string EncodeRaw(byte[] data, Bech32EncodingType encodingType)
+		{
+			return EncodeData(data.AsSpan(), encodingType);
+		}
+		public string EncodeRaw(ReadOnlySpan<byte> data, Bech32EncodingType encodingType)
+		{
+			return EncodeData(data, encodingType);
+		}
+#else
+		public string EncodeRaw(byte[] data, Bech32EncodingType encodingType)
+		{
+			return EncodeData(data, 0, data.Length, encodingType);
+		}
+#endif
+
+#if HAS_SPAN
 		public string Encode(byte witnessVerion, byte[] witnessProgramm)
 		{
-			var data = (new[] { witnessVerion }).Concat(ConvertBits(witnessProgramm, 8, 5));
-			var ret = EncodeData(data);
+			if (witnessProgramm == null)
+				throw new ArgumentNullException(nameof(witnessProgramm));
+			return Encode(witnessVerion, witnessProgramm.AsSpan());
+		}
+		public string Encode(byte witnessVerion, ReadOnlySpan<byte> witnessProgramm)
+		{
+			if (witnessVerion > 16)
+				throw new ArgumentOutOfRangeException(nameof(witnessVerion), "Invalid decoded witnessVerion, should <= 0 and > 16");
+			var bits = ConvertBits(witnessProgramm, 8, 5);
+			Span<byte> data = 1 + bits.Length is int v && v > 256 ? new byte[v] : stackalloc byte[v];
+			data[0] = witnessVerion;
+			bits.AsSpan().CopyTo(data.Slice(1));
+			var ret = EncodeData(data, witnessVerion == 0 ? Bech32EncodingType.BECH32 : Bech32EncodingType.BECH32M);
 			return ret;
 		}
+#else
+		public string Encode(byte witnessVerion, byte[] witnessProgramm)
+		{
+			if (witnessVerion > 16)
+				throw new ArgumentOutOfRangeException(nameof(witnessVerion), "Invalid decoded witnessVerion, should <= 0 and > 16");
+			var data = (new[] { witnessVerion }).Concat(ConvertBits(witnessProgramm, 8, 5));
+			var ret = EncodeData(data, 0, data.Length, witnessVerion == 0 ? Bech32EncodingType.BECH32 : Bech32EncodingType.BECH32M);
+			return ret;
+		}
+#endif
 	}
 }

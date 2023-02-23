@@ -1,10 +1,14 @@
-﻿using System;
+﻿#nullable enable
+using System;
 using System.Linq;
 using System.Collections.Generic;
 using Newtonsoft.Json;
 using System.IO;
 using NBitcoin.DataEncoders;
 using PartialSigKVMap = System.Collections.Generic.SortedDictionary<NBitcoin.PubKey, NBitcoin.TransactionSignature>;
+using System.Diagnostics.CodeAnalysis;
+using NBitcoin.Crypto;
+using System.Text;
 
 namespace NBitcoin
 {
@@ -12,8 +16,8 @@ namespace NBitcoin
 	{
 		// Those fields are not saved, but can be used as hint to solve more info for the PSBT
 		internal Script originalScriptSig = Script.Empty;
-		internal WitScript originalWitScript = Script.Empty;
-		internal TxOut orphanTxOut = null; // When this input is not segwit, but we don't have the previous tx
+		internal WitScript originalWitScript = WitScript.Empty;
+		internal TxOut? orphanTxOut = null; // When this input is not segwit, but we don't have the previous tx
 
 		internal PSBTInput(PSBT parent, uint index, TxIn input) : base(parent)
 		{
@@ -56,7 +60,7 @@ namespace NBitcoin
 							throw new FormatException("Invalid PSBTInput. Contains illegal value in key for NonWitnessUTXO");
 						if (non_witness_utxo != null)
 							throw new FormatException("Invalid PSBTInput. Duplicate non_witness_utxo");
-						non_witness_utxo = this.GetConsensusFactory().CreateTransaction();
+						non_witness_utxo = Parent.GetConsensusFactory().CreateTransaction();
 						non_witness_utxo.FromBytes(v);
 						break;
 					case PSBTConstants.PSBT_IN_WITNESS_UTXO:
@@ -64,7 +68,7 @@ namespace NBitcoin
 							throw new FormatException("Invalid PSBTInput. Contains illegal value in key for WitnessUTXO");
 						if (witness_utxo != null)
 							throw new FormatException("Invalid PSBTInput. Duplicate witness_utxo");
-						if (this.GetConsensusFactory().TryCreateNew<TxOut>(out var txout))
+						if (Parent.GetConsensusFactory().TryCreateNew<TxOut>(out var txout))
 						{
 							witness_utxo = txout;
 						}
@@ -75,10 +79,16 @@ namespace NBitcoin
 						witness_utxo.FromBytes(v);
 						break;
 					case PSBTConstants.PSBT_IN_PARTIAL_SIG:
-						var pubkey = new PubKey(k.Skip(1).ToArray());
-						if (partial_sigs.ContainsKey(pubkey))
-							throw new FormatException("Invalid PSBTInput. Duplicate key for partial_sigs");
-						partial_sigs.Add(pubkey, new TransactionSignature(v));
+						var pkbytes = k.Skip(1).ToArray();
+						if (pkbytes.Length == 33)
+						{
+							var pubkey = new PubKey(pkbytes);
+							if (partial_sigs.ContainsKey(pubkey))
+								throw new FormatException("Invalid PSBTInput. Duplicate key for partial_sigs");
+							partial_sigs.Add(pubkey, new TransactionSignature(v));
+						}
+						else
+							throw new FormatException("Unexpected public key size in the PSBT");
 						break;
 					case PSBTConstants.PSBT_IN_SIGHASH:
 						if (k.Length != 1)
@@ -106,6 +116,20 @@ namespace NBitcoin
 							throw new FormatException("Invalid PSBTInput. Duplicate key for redeem_script");
 						witness_script = Script.FromBytesUnsafe(v);
 						break;
+					case PSBTConstants.PSBT_IN_TAP_KEY_SIG:
+						if (k.Length != 1)
+							throw new FormatException("Invalid PSBTInput. Unexpected key length for PSBT_IN_TAP_KEY_SIG");
+						if (!TaprootSignature.TryParse(v, out var sig))
+							throw new FormatException("Invalid PSBTInput. Contains invalid TaprootSignature");
+						TaprootKeySignature = sig;
+						break;
+					case PSBTConstants.PSBT_IN_TAP_INTERNAL_KEY:
+						if (k.Length != 1)
+							throw new FormatException("Invalid PSBTInput. Unexpected key length for PSBT_IN_TAP_INTERNAL_KEY");
+						if (!TaprootInternalPubKey.TryCreate(v, out var tpk))
+							throw new FormatException("Invalid PSBTInput. Contains invalid internal taproot pubkey");
+						TaprootInternalKey = tpk;
+						break;
 					case PSBTConstants.PSBT_IN_BIP32_DERIVATION:
 						var pubkey2 = new PubKey(k.Skip(1).ToArray());
 						if (hd_keypaths.ContainsKey(pubkey2))
@@ -113,6 +137,27 @@ namespace NBitcoin
 						var masterFingerPrint = new HDFingerprint(v.Take(4).ToArray());
 						KeyPath path = KeyPath.FromBytes(v.Skip(4).ToArray());
 						hd_keypaths.Add(pubkey2, new RootedKeyPath(masterFingerPrint, path));
+						break;
+					case PSBTConstants.PSBT_IN_TAP_BIP32_DERIVATION:
+						var pubkey3 = new TaprootPubKey(k.Skip(1).ToArray());
+						if (hd_taprootkeypaths.ContainsKey(pubkey3))
+							throw new FormatException("Invalid PSBTOutput, duplicate key for PSBT_IN_TAP_BIP32_DERIVATION");
+						var bs = new BitcoinStream(v);
+						List<uint256> hashes = null!;
+						bs.ReadWrite(ref hashes);
+						var pos = (int)bs.Inner.Position;
+						KeyPath path2 = KeyPath.FromBytes(v.Skip(pos + 4).ToArray());
+						hd_taprootkeypaths.Add(pubkey3,
+							new TaprootKeyPath(
+								new RootedKeyPath(new HDFingerprint(v.Skip(pos).Take(4).ToArray()), path2),
+								hashes.ToArray()));
+						break;
+					case PSBTConstants.PSBT_IN_TAP_MERKLE_ROOT:
+						if (k.Length != 1)
+							throw new FormatException("Invalid PSBTInput. Unexpected key length for PSBT_IN_TAP_MERKLE_ROOT");
+						if (v.Length != 32)
+							throw new FormatException("Invalid PSBTInput. Unexpected value length for PSBT_IN_TAP_MERKLE_ROOT");
+						TaprootMerkleRoot = new uint256(v);
 						break;
 					case PSBTConstants.PSBT_IN_SCRIPTSIG:
 						if (k.Length != 1)
@@ -138,22 +183,42 @@ namespace NBitcoin
 			}
 		}
 
+		/// <summary>
+		/// Changes the nSequence field of the corresponding TxIn.
+		/// You should not call this method if any PSBTInput in the same PSBT has a signature.
+		/// Because the siagnature usually commits to the old nSequence value.
+		/// </summary>
+		/// <exception cref="InvalidOperationException">When at least one signature exists in any other inputs in the PSBT</exception>
+		public void SetSequence(ushort sequence)
+		{
+			for (int i = 0; i < this.Parent.Inputs.Count; i++)
+			{
+				var txIn = this.Parent.Inputs[i];
+				if (txIn.partial_sigs.Count > 0 || txIn.final_script_sig != null || txIn.final_script_witness != null)
+				{
+					throw new InvalidOperationException($"You should not change the transaction's input nSequence after signing. In case of particular type of SIGHASH, this will make your signature invalid. PSBTInput in index {i} had signature");
+				}
+			}
+			Transaction.Inputs[this.Index].Sequence = sequence;
+		}
+
 		internal TxIn TxIn { get; }
+		internal IndexedTxIn GetIndexedInput() => new IndexedTxIn() { Transaction = Transaction, Index = Index, TxIn = TxIn, PrevOut = PrevOut, ScriptSig = TxIn.ScriptSig, WitScript = TxIn.WitScript };
 
 		public OutPoint PrevOut => TxIn.PrevOut;
 
 		public uint Index { get; }
 		internal Transaction Transaction => Parent.tx;
 
-		private Transaction non_witness_utxo;
-		private TxOut witness_utxo;
-		private Script final_script_sig;
-		private WitScript final_script_witness;
+		private Transaction? non_witness_utxo;
+		private TxOut? witness_utxo;
+		private Script? final_script_sig;
+		private WitScript? final_script_witness;
 		private PartialSigKVMap partial_sigs = new PartialSigKVMap(PubKeyComparer.Instance);
 
 		SigHash? sighash_type;
 
-		public Transaction NonWitnessUtxo
+		public Transaction? NonWitnessUtxo
 		{
 			get
 			{
@@ -165,7 +230,7 @@ namespace NBitcoin
 			}
 		}
 
-		public TxOut WitnessUtxo
+		public TxOut? WitnessUtxo
 		{
 			get
 			{
@@ -189,7 +254,7 @@ namespace NBitcoin
 			}
 		}
 
-		public Script FinalScriptSig
+		public Script? FinalScriptSig
 		{
 			get
 			{
@@ -201,7 +266,7 @@ namespace NBitcoin
 			}
 		}
 
-		public WitScript FinalScriptWitness
+		public WitScript? FinalScriptWitness
 		{
 			get
 			{
@@ -213,7 +278,8 @@ namespace NBitcoin
 			}
 		}
 
-
+		public TaprootSignature? TaprootKeySignature { get; set; }
+		public uint256? TaprootMerkleRoot { get; set; }
 
 		public PartialSigKVMap PartialSigs
 		{
@@ -223,23 +289,13 @@ namespace NBitcoin
 			}
 		}
 
-		public override void AddKeyPath(PubKey key, RootedKeyPath rootedKeyPath)
-		{
-			base.AddKeyPath(key, rootedKeyPath);
-			TrySlimUTXO();
-		}
-
-
 		public void UpdateFromCoin(ICoin coin)
 		{
 			if (coin == null)
 				throw new ArgumentNullException(nameof(coin));
-			if (IsFinalized())
-				throw new InvalidOperationException("Impossible to modify the PSBTInput if it has been finalized");
 			if (coin.Outpoint != PrevOut)
 				throw new ArgumentException("This coin does not match the input", nameof(coin));
-			if (IsFinalized())
-				return;
+			
 			if (coin is ScriptCoin scriptCoin)
 			{
 				if (scriptCoin.RedeemType == RedeemType.P2SH)
@@ -287,8 +343,8 @@ namespace NBitcoin
 					}
 				}
 			}
-
-			if (coin.GetHashVersion() == HashVersion.Witness || witness_script != null)
+			if (Parent.Network.Consensus.NeverNeedPreviousTxForSigning ||
+				!coin.IsMalleable || witness_script != null)
 			{
 				witness_utxo = coin.TxOut;
 				non_witness_utxo = null;
@@ -298,12 +354,18 @@ namespace NBitcoin
 				orphanTxOut = coin.TxOut;
 				witness_utxo = null;
 			}
+			if (IsFinalized())
+				ClearForFinalize();
 		}
 
-		internal void Combine(PSBTInput other)
+		/// <summary>
+		/// Import informations contained by <paramref name="other"/> into this instance.
+		/// </summary>
+		/// <param name="other"></param>
+		public void UpdateFrom(PSBTInput other)
 		{
-			if (this.IsFinalized())
-				return;
+			if (other == null)
+				throw new ArgumentNullException(nameof(other));
 
 			foreach (var uk in other.unknown)
 				unknown.TryAdd(uk.Key, uk.Value);
@@ -314,17 +376,12 @@ namespace NBitcoin
 
 			if (other.final_script_witness != null)
 				final_script_witness = other.final_script_witness;
-			if (IsFinalized())
-			{
-				ClearForFinalize();
-				return;
-			}
 
 			if (non_witness_utxo == null && other.non_witness_utxo != null)
 				non_witness_utxo = other.non_witness_utxo;
 
 			if (witness_utxo == null && other.witness_utxo != null)
-				non_witness_utxo = other.non_witness_utxo;
+				witness_utxo = other.witness_utxo;
 
 			if (sighash_type == 0 && other.sighash_type > 0)
 				sighash_type = other.sighash_type;
@@ -341,6 +398,29 @@ namespace NBitcoin
 			foreach (var keyPath in other.hd_keypaths)
 				hd_keypaths.TryAdd(keyPath.Key, keyPath.Value);
 
+			foreach (var keyPath in other.HDTaprootKeyPaths)
+				HDTaprootKeyPaths.TryAdd(keyPath.Key, keyPath.Value);
+
+			TaprootInternalKey ??= other.TaprootInternalKey;
+			TaprootKeySignature ??= other.TaprootKeySignature;
+			TaprootMerkleRoot ??= other.TaprootMerkleRoot;
+			if (IsFinalized())
+				ClearForFinalize();
+		}
+
+		public uint256 GetSignatureHash(TaprootSigHash sigHash, PrecomputedTransactionData precomputedTransactionData)
+		{
+			if (GetSignableCoin() is ICoin coin)
+				return this.Transaction.Inputs.FindIndexedInput((int)Index)
+									   .GetSignatureHashTaproot(coin, sigHash, precomputedTransactionData);
+			throw new InvalidOperationException("WitnessUtxo, NonWitnessUtxo, WitnessScript or redeemScript is required to get the signature hash");
+		}
+		public uint256 GetSignatureHash(SigHash sigHash, PrecomputedTransactionData? precomputedTransactionData)
+		{
+			if (GetSignableCoin() is ICoin coin)
+				return this.Transaction.Inputs.FindIndexedInput((int)Index)
+									   .GetSignatureHash(coin, sigHash, precomputedTransactionData);
+			throw new InvalidOperationException("WitnessUtxo, NonWitnessUtxo, WitnessScript or redeemScript is required to get the signature hash");
 		}
 
 		public bool IsFinalized() => final_script_sig != null || final_script_witness != null;
@@ -373,25 +453,96 @@ namespace NBitcoin
 		}
 
 		/// <summary>
+		/// Delete superflous information from a finalized input.
 		/// This will not clear utxos since tx extractor might want to check the validity
 		/// </summary>
-		internal void ClearForFinalize()
+		/// <exception cref="System.InvalidOperationException">The input need to be finalized</exception>
+		public void ClearForFinalize()
 		{
+			if (!IsFinalized())
+				throw new InvalidOperationException("The input need to be finalized");
 			this.redeem_script = null;
 			this.witness_script = null;
 			this.partial_sigs.Clear();
 			this.hd_keypaths.Clear();
 			this.sighash_type = null;
+			this.TaprootKeySignature = null;
+			this.TaprootInternalKey = null;
 		}
 
-		public override Coin GetSignableCoin(out string error)
+		/// <summary>
+		/// Represent this input as a coin that can be used for signing operations.
+		/// Returns null if <see cref="WitnessUtxo"/>, <see cref="NonWitnessUtxo"/> are not set
+		/// or if <see cref="PSBTCoin.WitnessScript"/> or <see cref="PSBTCoin.RedeemScript"/> are missing but needed.
+		/// </summary>
+		/// <returns>The input as a signable coin</returns>
+		public new Coin? GetSignableCoin()
 		{
-			if (witness_utxo == null && non_witness_utxo == null)
+			return base.GetSignableCoin();
+		}
+
+		/// <summary>
+		/// Represent this input as a coin that can be used for signing operations.
+		/// Returns null if <see cref="WitnessUtxo"/>, <see cref="NonWitnessUtxo"/> are not set
+		/// or if <see cref="PSBTCoin.WitnessScript"/> or <see cref="PSBTCoin.RedeemScript"/> are missing but needed.
+		/// </summary>
+		/// <param name="error">If it is not possible to retrieve the signable coin, a human readable reason.</param>
+		/// <returns>The input as a signable coin</returns>
+		public override Coin? GetSignableCoin(out string? error)
+		{
+			if (witness_utxo is null && non_witness_utxo is null)
 			{
 				error = "Neither witness_utxo nor non_witness_output is set";
 				return null;
 			}
 			return base.GetSignableCoin(out error);
+		}
+
+		internal override Script? GetRedeemScript()
+		{
+			var redeemScript = base.GetRedeemScript();
+			if (redeemScript != null)
+				return redeem_script;
+			if (FinalScriptSig is null)
+				return null;
+			var coin = GetCoin();
+			if (coin is null)
+				return null;
+			var scriptId = PayToScriptHashTemplate.Instance.ExtractScriptPubKeyParameters(coin.ScriptPubKey);
+			if (scriptId is null)
+				return null;
+			return PayToScriptHashTemplate.Instance.ExtractScriptSigParameters(FinalScriptSig, scriptId)?.RedeemScript;
+		}
+
+		internal override Script? GetWitnessScript()
+		{
+			var witnessScript = base.GetWitnessScript();
+			if (witnessScript != null)
+				return witness_script;
+			if (FinalScriptWitness is null)
+				return null;
+			var coin = GetCoin();
+			if (coin is null)
+				return null;
+			var witScriptId = PayToWitScriptHashTemplate.Instance.ExtractScriptPubKeyParameters(coin.ScriptPubKey);
+			if (witScriptId != null)
+			{
+				return PayToWitScriptHashTemplate.Instance.ExtractWitScriptParameters(FinalScriptWitness, witScriptId);
+			}
+			// Maybe wrapped P2SH
+			if (FinalScriptSig is null)
+				return null;
+			var scriptId = PayToScriptHashTemplate.Instance.ExtractScriptPubKeyParameters(coin.ScriptPubKey);
+			if (scriptId is null)
+				return null;
+			var p2shRedeem = PayToScriptHashTemplate.Instance.ExtractScriptSigParameters(FinalScriptSig, scriptId)
+				?.RedeemScript;
+			if (p2shRedeem is null)
+				return null;
+			witScriptId = PayToWitScriptHashTemplate.Instance.ExtractScriptPubKeyParameters(p2shRedeem);
+			if (witScriptId is null)
+				return null;
+			return PayToWitScriptHashTemplate.Instance.ExtractWitScriptParameters(FinalScriptWitness, witScriptId);
 		}
 
 		public IList<PSBTError> CheckSanity()
@@ -411,14 +562,11 @@ namespace NBitcoin
 					errors.Add(new PSBTError(Index, "Input finalized, but witness script is not null"));
 			}
 
-			if (witness_utxo != null && non_witness_utxo != null)
-				errors.Add(new PSBTError(Index, "witness utxo and non witness utxo simultaneously present"));
+			if (witness_script != null && witness_utxo is null && non_witness_utxo is null)
+				errors.Add(new PSBTError(Index, "witness script present but not witness_utxo or non_witness_utxo"));
 
-			if (witness_script != null && witness_utxo == null)
-				errors.Add(new PSBTError(Index, "witness script present but no witness utxo"));
-
-			if (final_script_witness != null && witness_utxo == null)
-				errors.Add(new PSBTError(Index, "final witness script present but no witness utxo"));
+			if (final_script_witness != null && witness_utxo is null && non_witness_utxo is null)
+				errors.Add(new PSBTError(Index, "final witness script present but not witness_utxo or non_witness_utxo"));
 
 			if (NonWitnessUtxo != null)
 			{
@@ -464,7 +612,11 @@ namespace NBitcoin
 			return errors;
 		}
 
-		public void TrySign(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath accountKeyPath, SigHash sigHash = SigHash.All)
+		public void TrySign(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath? accountKeyPath)
+		{
+			TrySign(accountHDScriptPubKey, accountKey, accountKeyPath, null);
+		}
+		internal void TrySign(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath? accountKeyPath, SigningOptions? signingOptions)
 		{
 			if (accountKey == null)
 				throw new ArgumentNullException(nameof(accountKey));
@@ -477,17 +629,11 @@ namespace NBitcoin
 			foreach (var hdk in this.HDKeysFor(accountHDScriptPubKey, cache, accountKeyPath))
 			{
 				if (((HDKeyCache)cache.Derive(hdk.AddressKeyPath)).Inner is ISecret k)
-					Sign(k.PrivateKey, sigHash);
+					Sign(k.PrivateKey, signingOptions);
 				else
 					throw new ArgumentException(paramName: nameof(accountKey), message: "This should be a private key");
 			}
 		}
-
-		public void TrySign(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, SigHash sigHash = SigHash.All)
-		{
-			TrySign(accountHDScriptPubKey, accountKey, null, sigHash);
-		}
-
 		public void AssertSanity()
 		{
 			var errors = CheckSanity();
@@ -558,6 +704,33 @@ namespace NBitcoin
 				stream.ReadWriteAsVarString(ref value);
 			}
 
+			if (this.TaprootMerkleRoot is uint256 merkleRoot)
+			{
+				stream.ReadWriteAsVarInt(ref defaultKeyLen);
+				var key = PSBTConstants.PSBT_IN_TAP_MERKLE_ROOT;
+				stream.ReadWrite(ref key);
+				var value = merkleRoot.ToBytes();
+				stream.ReadWriteAsVarString(ref value);
+			}
+
+			if (this.TaprootInternalKey is TaprootInternalPubKey tp)
+			{
+				stream.ReadWriteAsVarInt(ref defaultKeyLen);
+				var key = PSBTConstants.PSBT_IN_TAP_INTERNAL_KEY;
+				stream.ReadWrite(ref key);
+				var b = tp.ToBytes();
+				stream.ReadWriteAsVarString(ref b);
+			}
+
+			if (this.TaprootKeySignature is TaprootSignature tsig)
+			{
+				stream.ReadWriteAsVarInt(ref defaultKeyLen);
+				var key = PSBTConstants.PSBT_IN_TAP_KEY_SIG;
+				stream.ReadWrite(ref key);
+				var b = tsig.ToBytes();
+				stream.ReadWriteAsVarString(ref b);
+			}
+
 			// Write any partial signatures
 			foreach (var sig_pair in partial_sigs)
 			{
@@ -576,6 +749,24 @@ namespace NBitcoin
 				var path = pathPair.Value.KeyPath.ToBytes();
 				var pathInfo = masterFingerPrint.ToBytes().Concat(path);
 				stream.ReadWriteAsVarString(ref pathInfo);
+			}
+			foreach (var pathPair in hd_taprootkeypaths)
+			{
+				var key = new byte[] { PSBTConstants.PSBT_IN_TAP_BIP32_DERIVATION }.Concat(pathPair.Key.ToBytes());
+				stream.ReadWriteAsVarString(ref key);
+				uint leafCount = (uint)pathPair.Value.LeafHashes.Length;
+				BitcoinStream bs = new BitcoinStream(new MemoryStream(), true);
+				bs.ReadWriteAsVarInt(ref leafCount);
+				foreach (var hash in pathPair.Value.LeafHashes)
+				{
+					bs.ReadWrite(hash);
+				}
+				var b = pathPair.Value.RootedKeyPath.MasterFingerprint.ToBytes();
+				bs.ReadWrite(ref b);
+				b = pathPair.Value.RootedKeyPath.KeyPath.ToBytes();
+				bs.ReadWrite(ref b);
+				b = ((MemoryStream)bs.Inner).ToArrayEfficient();
+				stream.ReadWriteAsVarString(ref b);
 			}
 
 			// Write script sig
@@ -617,12 +808,10 @@ namespace NBitcoin
 		{
 			MemoryStream ms = new MemoryStream();
 			var bs = new BitcoinStream(ms, true);
-			bs.ConsensusFactory = Parent.tx.GetConsensusFactory();
+			bs.ConsensusFactory = Parent.GetConsensusFactory();
 			this.Serialize(bs);
 			return ms.ToArrayEfficient();
 		}
-
-		public virtual ConsensusFactory GetConsensusFactory() => Bitcoin.Instance.Mainnet.Consensus.ConsensusFactory;
 
 		internal void Write(JsonTextWriter jsonWriter)
 		{
@@ -637,6 +826,19 @@ namespace NBitcoin
 					jsonWriter.WritePropertyValue(Encoders.Hex.EncodeData(el.Key), Encoders.Hex.EncodeData(el.Value));
 				}
 				jsonWriter.WriteEndObject();
+			}
+
+			if (this.TaprootInternalKey is TaprootInternalPubKey tpk)
+			{
+				jsonWriter.WritePropertyValue("taproot_internal_key", tpk.ToString());
+			}
+			if (this.TaprootMerkleRoot is uint256 r)
+			{
+				jsonWriter.WritePropertyValue("taproot_merkle_root", r.ToString());
+			}
+			if (this.TaprootKeySignature is TaprootSignature tsig)
+			{
+				jsonWriter.WritePropertyValue("taproot_key_signature", tsig.ToString());
 			}
 			jsonWriter.WritePropertyName("partial_signatures");
 			jsonWriter.WriteStartObject();
@@ -669,8 +871,7 @@ namespace NBitcoin
 			{
 				jsonWriter.WritePropertyName("non_witness_utxo");
 				jsonWriter.WriteStartObject();
-				var formatter = new RPC.BlockExplorerFormatter();
-				formatter.WriteTransaction2(jsonWriter, NonWitnessUtxo);
+				RPC.BlockExplorerFormatter.WriteTransaction(jsonWriter, NonWitnessUtxo);
 				jsonWriter.WriteEndObject();
 			}
 			if (this.WitnessUtxo != null)
@@ -682,7 +883,7 @@ namespace NBitcoin
 				jsonWriter.WriteEndObject();
 			}
 			jsonWriter.WriteBIP32Derivations(this.hd_keypaths);
-
+			jsonWriter.WriteBIP32Derivations(this.hd_taprootkeypaths);
 			jsonWriter.WriteEndObject();
 		}
 
@@ -702,13 +903,11 @@ namespace NBitcoin
 					return "NONE|ANYONECANPAY";
 				case SigHash.Single | SigHash.AnyoneCanPay:
 					return "SINGLE|ANYONECANPAY";
-				case SigHash.Undefined:
-					return "UNDEFINED";
 				default:
 					return sighashType.ToString();
 			}
 		}
-		public TxOut GetTxOut()
+		public TxOut? GetTxOut()
 		{
 			if (WitnessUtxo != null)
 				return WitnessUtxo;
@@ -722,7 +921,12 @@ namespace NBitcoin
 				return orphanTxOut;
 			return null;
 		}
-		public bool TryFinalizeInput(out IList<PSBTError> errors)
+
+		public bool TryFinalizeInput([MaybeNullWhen(true)] out IList<PSBTError> errors)
+		{
+			return TryFinalizeInput(null, out errors);
+		}
+		internal bool TryFinalizeInput(SigningOptions? signingOptions, [MaybeNullWhen(true)] out IList<PSBTError> errors)
 		{
 			errors = null;
 			if (IsFinalized())
@@ -739,33 +943,73 @@ namespace NBitcoin
 				return false;
 			}
 			var coin = this.GetSignableCoin(out var getSignableCoinError) ?? this.GetCoin(); // GetCoin can't be null at this stage.
+			if (coin is null)
+				throw new InvalidOperationException("Bug in NBitcoin during TryFinalizeInput: Please report it");
+
+			signingOptions ??= Parent.Settings.SigningOptions;
+
 			TransactionBuilder transactionBuilder = Parent.CreateTransactionBuilder();
+			signingOptions = Parent.GetSigningOptions(signingOptions);
+			if (!IsTaprootReady(signingOptions, coin))
+			{
+				errors = new List<PSBTError>();
+				errors.Add(new PSBTError(Index, "When finalizing a taproot input, you need to make sure that all inputs of the PSBT contains witness_utxo or non_witness_utxo"));
+				return false;
+			}
+			transactionBuilder.SetSigningOptions(signingOptions);
 			transactionBuilder.AddCoins(coin);
 			foreach (var sig in PartialSigs)
 			{
 				transactionBuilder.AddKnownSignature(sig.Key, sig.Value, coin.Outpoint);
 			}
-			Transaction signed = null;
+#if HAS_SPAN
+			if (TaprootInternalKey is TaprootInternalPubKey tpk && TaprootKeySignature is TaprootSignature ts)
+			{
+				var k = TaprootFullPubKey.Create(tpk, TaprootMerkleRoot);
+				transactionBuilder.AddKnownSignature(k, ts, coin.Outpoint);
+			}
+#endif
+			var finalizedInput = this;
+			var previousFinalScriptSig = this.FinalScriptSig;
+			var previousFinalScriptWit = this.FinalScriptWitness;
+
+			void Rollback()
+			{
+				this.FinalScriptSig = previousFinalScriptSig;
+				this.FinalScriptWitness = previousFinalScriptWit;
+			}
 			try
 			{
-				var signedTx = Parent.Settings.IsSmart ? Parent.GetOriginalTransaction() : Transaction.Clone();
-				signed = transactionBuilder.SignTransaction(signedTx, SigHash.All);
+				transactionBuilder.FinalizePSBTInput(this);
+				if (!finalizedInput.IsFinalized() && Parent.Settings.IsSmart)
+				{
+					transactionBuilder.ExtractSignatures(finalizedInput.PSBT, Parent.GetOriginalTransaction());
+					transactionBuilder.FinalizePSBTInput(finalizedInput);
+				}
 			}
 			catch (Exception ex)
 			{
+				Rollback();
 				errors = new List<PSBTError>() { new PSBTError(Index, $"Error while finalizing the input \"{getSignableCoinError ?? ex.Message}\"") };
 				return false;
 			}
-			var indexedInput = signed.Inputs.FindIndexedInput(coin.Outpoint);
-			if (!indexedInput.VerifyScript(coin, out var error))
+			if (!finalizedInput.IsFinalized())
 			{
-				errors = new List<PSBTError>() { new PSBTError(Index, $"The finalized input script does not properly validate \"{error}\"") };
+				Rollback();
+				errors = new List<PSBTError>() { new PSBTError(Index, $"Impossible to finalize the input") };
 				return false;
 			}
+			if (!Parent.Settings.SkipVerifyScript)
+			{
+				if (!finalizedInput.VerifyScript(Parent.Settings.ScriptVerify, signingOptions.PrecomputedTransactionData, out var err2))
+				{
+					Rollback();
+					errors = new List<PSBTError>() { new PSBTError(Index, $"The finalized input script does not properly validate \"{err2}\"") };
+					return false;
+				}
+			}
 
-			FinalScriptSig = indexedInput.ScriptSig is Script oo && oo != Script.Empty ? oo : null;
-			FinalScriptWitness = indexedInput.WitScript is WitScript o && o != WitScript.Empty ? o : null;
-			if (transactionBuilder.FindSignableCoin(indexedInput) is ScriptCoin scriptCoin)
+			if (coin is ScriptCoin scriptCoin)
 			{
 				if (scriptCoin.IsP2SH)
 					RedeemScript = scriptCoin.GetP2SHRedeem();
@@ -777,44 +1021,113 @@ namespace NBitcoin
 			return true;
 		}
 
+		internal static bool IsTaprootReady(SigningOptions signingOptions, Coin coin)
+		{
+			return !coin.ScriptPubKey.IsScriptType(ScriptType.Taproot) || (signingOptions.PrecomputedTransactionData is TaprootReadyPrecomputedTransactionData);
+		}
+
+		public bool VerifyScript(ScriptVerify scriptVerify, PrecomputedTransactionData? precomputedTransactionData, out ScriptError err)
+		{
+			var eval = new ScriptEvaluationContext
+			{
+				ScriptVerify = scriptVerify
+			};
+			if (Transaction is IHasForkId)
+				eval.ScriptVerify |= NBitcoin.ScriptVerify.ForkId;
+			var txout = GetTxOut();
+			if (txout is null)
+			{
+				err = ScriptError.UnknownError;
+				return false;
+			}
+			var checker = new TransactionChecker(Transaction, (int)Index, GetTxOut(), precomputedTransactionData);
+			var result = eval.VerifyScript(this.FinalScriptSig, this.FinalScriptWitness, txout.ScriptPubKey, checker);
+			err = eval.Error;
+			return result;
+		}
+
 		public void FinalizeInput()
 		{
 			if (!TryFinalizeInput(out var errors))
 				throw new PSBTException(errors);
 		}
 
-		public TransactionSignature Sign(Key key)
+		public void Sign(Key key)
 		{
-			return Sign(key, SigHash.All);
+			Sign(key, null);
 		}
-		public TransactionSignature Sign(Key key, SigHash sigHash)
+		public void Sign(KeyPair keyPair)
 		{
-			CheckCompatibleSigHash(sigHash);
-			if (PartialSigs.ContainsKey(key.PubKey))
+			Sign(keyPair, null);
+		}
+		internal void Sign(KeyPair keyPair, SigningOptions? signingOptions)
+		{
+			if (keyPair == null)
+				throw new ArgumentNullException(nameof(keyPair));
+			if (this.IsFinalized())
+				return;
+			signingOptions = Parent.GetSigningOptions(signingOptions);
+			if (keyPair.PubKey is PubKey ecdsapk && PartialSigs.TryGetValue(ecdsapk, out var existingSig))
 			{
-				var signature = PartialSigs[key.PubKey];
-				if (sigHash != signature.SigHash)
+				CheckCompatibleSigHash(signingOptions.SigHash);
+				var signature = PartialSigs[ecdsapk];
+				var signatureSigHash = existingSig.SigHash;
+				if (Transaction is IHasForkId)
+					signatureSigHash = (SigHash)((uint)existingSig.SigHash & ~(0x40u));
+				if (!SameSigHash(signatureSigHash, signingOptions.SigHash))
 					throw new InvalidOperationException("A signature with a different sighash is already in the partial sigs");
-				return signature;
+				return;
 			}
+
 			AssertSanity();
 			var coin = GetSignableCoin();
 			if (coin == null)
-				return null;
+				return;
 
+			signingOptions = Parent.GetSigningOptions(signingOptions);
+			if (!IsTaprootReady(signingOptions, coin))
+				return;
 			var builder = Parent.CreateTransactionBuilder();
-			builder.AddCoins(coin);
-			builder.AddKeys(key);
-			if (builder.TrySignInput(Transaction, Index, sigHash, out var signature2))
+			builder.AddKeys(keyPair);
+			builder.SetSigningOptions(signingOptions);
+			builder.SignPSBTInput(this);
+		}
+		internal void Sign(Key key, SigningOptions? signingOptions)
+		{
+			if (key == null)
+				throw new ArgumentNullException(nameof(key));
+			var coin = GetSignableCoin();
+			if (coin == null)
+				return;
+			if (coin.ScriptPubKey.IsScriptType(ScriptType.Taproot))
 			{
-				this.PartialSigs.TryAdd(key.PubKey, signature2);
+#if HAS_SPAN
+				Sign(key.CreateTaprootKeyPair(TaprootMerkleRoot), signingOptions);
+				return;
+#else
+				throw new NotSupportedException("Impossible to sign taproot input on .NET Framework");
+#endif
 			}
-			return signature2;
+			else
+			{
+				Sign(key.CreateKeyPair(), signingOptions);
+				return;
+			}
 		}
 
+		bool SameSigHash(SigHash a, SigHash b)
+		{
+			if (a == b)
+				return true;
+			if (Transaction is not IHasForkId)
+				return false;
+			a = (SigHash)((uint)a & ~(0x40u));
+			b = (SigHash)((uint)a & ~(0x40u));
+			return a == b;
+		}
 		private void CheckCompatibleSigHash(SigHash sigHash)
 		{
-			if (SighashType is SigHash s && s != sigHash)
+			if (SighashType is SigHash s && !SameSigHash(s,sigHash))
 				throw new InvalidOperationException($"The input assert the use of sighash {GetName(s)}");
 		}
 
@@ -833,7 +1146,8 @@ namespace NBitcoin
 			if (coin == null)
 				return false;
 
-			if (coin.GetHashVersion() == HashVersion.Witness)
+			if (Parent.Network.Consensus.NeverNeedPreviousTxForSigning ||
+				!coin.IsMalleable)
 			{
 				if (WitnessUtxo == null)
 				{
@@ -846,7 +1160,12 @@ namespace NBitcoin
 			return false;
 		}
 
-		public override Coin GetCoin()
+		/// <summary>
+		/// Represent this input as a coin.
+		/// Returns null if <see cref="WitnessUtxo"/> or <see cref="NonWitnessUtxo"/> is not set.
+		/// </summary>
+		/// <returns>The input as a coin</returns>
+		public override Coin? GetCoin()
 		{
 			var txout = GetTxOut();
 			if (txout == null)
@@ -864,7 +1183,7 @@ namespace NBitcoin
 			return strWriter.ToString();
 		}
 
-		protected override PSBTHDKeyMatch CreateHDKeyMatch(IHDKey accountKey, KeyPath addressKeyPath, KeyValuePair<PubKey, RootedKeyPath> kv)
+		protected override PSBTHDKeyMatch CreateHDKeyMatch(IHDKey accountKey, KeyPath addressKeyPath, KeyValuePair<IPubKey, RootedKeyPath> kv)
 		{
 			return new PSBTHDKeyMatch<PSBTInput>(this, accountKey, addressKeyPath, kv);
 		}
@@ -877,11 +1196,12 @@ namespace NBitcoin
 
 		internal void Add(PSBTInput input)
 		{
+			if (!_InputsByOutpoint.TryAdd(input.TxIn.PrevOut, input))
+				throw new InvalidOperationException("Two inputs are spending the same output in the same transaction");
 			_Inner.Add(input);
-			_InputsByOutpoint.Add(input.TxIn.PrevOut, input);
 		}
 
-		public PSBTInput FindIndexedInput(OutPoint prevOut)
+		public PSBTInput? FindIndexedInput(OutPoint prevOut)
 		{
 			if (prevOut == null)
 				throw new ArgumentNullException(nameof(prevOut));
@@ -891,3 +1211,4 @@ namespace NBitcoin
 	}
 
 }
+#nullable disable

@@ -76,8 +76,8 @@ namespace NBitcoin
 		public Money GetFee(int virtualSize)
 		{
 			Money nFee = _FeePerK.Satoshi * virtualSize / 1000;
-			if (nFee == Money.Zero && _FeePerK.Satoshi > Money.Zero)
-				nFee = _FeePerK.Satoshi;
+			if (nFee == Money.Zero)
+				nFee = Money.Satoshis(1.0m);
 			return nFee;
 		}
 		public Money GetFee(Transaction tx)
@@ -100,19 +100,7 @@ namespace NBitcoin
 
 		public override string ToString()
 		{
-			int divisibility = 0;
-			var value = SatoshiPerByte;
-			while (true)
-			{
-				var rounded = Math.Round(value, divisibility, MidpointRounding.AwayFromZero);
-				if (rounded == 0 || (Math.Abs(rounded - value) / value) < 0.001m)
-				{
-					value = rounded;
-					break;
-				}
-				divisibility++;
-			}
-			return String.Format("{0} Sat/B", value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+			return String.Format("{0} Sat/B", SatoshiPerByte.ToString(System.Globalization.CultureInfo.InvariantCulture));
 		}
 
 		#region IEquatable<FeeRate> Members

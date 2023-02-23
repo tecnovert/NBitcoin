@@ -36,13 +36,23 @@ namespace NBitcoin.Altcoins.Elements
 			return new ElementsTransaction<TNetwork>();
 		}
 
+		public override TxOut CreateTxOut()
+		{
+			return new ElementsTxOut<TNetwork>();
+		}
+
+		public override TxIn CreateTxIn()
+		{
+			return new ElementsTxIn<TNetwork>();
+		}
+
 		protected override TransactionBuilder CreateTransactionBuilderCore(Network network)
 		{
 			var builder = new ElementsTransactionBuilder(network);
 			builder.StandardTransactionPolicy.Strategy = new StandardElementsTransactionPolicyStrategy();
 			return builder;
 		}
-#pragma warning disable CS0618 // Type or member is obsolete
+
 		class ElementsTransactionBuilder : TransactionBuilder
 		{
 			public ElementsTransactionBuilder(Network network): base(network)
@@ -72,7 +82,7 @@ namespace NBitcoin.Altcoins.Elements
 				}
 			}
 		}
-#pragma warning restore CS0618 // Type or member is obsolete
+
 		class StandardElementsTransactionPolicyStrategy : StandardTransactionPolicyStrategy
 		{
 			public override bool IsStandardOutput(TxOut txout)

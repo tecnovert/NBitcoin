@@ -1,6 +1,8 @@
 ﻿using NBitcoin.Crypto;
 using NBitcoin.DataEncoders;
+#if !NO_BC
 using NBitcoin.BouncyCastle.Math;
+#endif
 using System;
 using System.Linq;
 using System.Text;
@@ -176,7 +178,7 @@ namespace NBitcoin
 			var passfactor = prefactor;
 			if (hasLotSequence)
 			{
-				passfactor = Hashes.Hash256(prefactor.Concat(ownerEntropy).ToArray()).ToBytes();
+				passfactor = Hashes.DoubleSHA256(prefactor.Concat(ownerEntropy).ToArray()).ToBytes();
 			}
 
 			var passpoint = new Key(passfactor, fCompressedIn: true).PubKey.ToBytes();
@@ -190,7 +192,7 @@ namespace NBitcoin
 			return network.NetworkStringParser.GetBase58CheckEncoder().EncodeData(bytes);
 		}
 
-		public BitcoinPassphraseCode(string wif, Network expectedNetwork = null)
+		public BitcoinPassphraseCode(string wif, Network expectedNetwork)
 		{
 			Init<BitcoinPassphraseCode>(wif, expectedNetwork);
 		}
@@ -218,19 +220,24 @@ namespace NBitcoin
 			//Generate 24 random bytes, call this seedb. Take SHA256(SHA256(seedb)) to yield 32 bytes, call this factorb.
 			seedb = seedb ?? RandomUtils.GetBytes(24);
 
-			var factorb = Hashes.Hash256(seedb).ToBytes();
+			var factorb = Hashes.DoubleSHA256(seedb).ToBytes();
 
 			//ECMultiply passpoint by factorb.
+#if HAS_SPAN
+			if (!NBitcoinContext.Instance.TryCreatePubKey(Passpoint, out var eckey) || eckey is null)
+				throw new InvalidOperationException("Invalid Passpoint");
+			var pubKey = new PubKey(eckey.TweakMul(factorb), isCompressed);
+#else
 			var curve = ECKey.Secp256k1;
 			var passpoint = curve.Curve.DecodePoint(Passpoint);
 			var pubPoint = passpoint.Multiply(new BigInteger(1, factorb));
 
 			//Use the resulting EC point as a public key
 			var pubKey = new PubKey(pubPoint.GetEncoded());
-
 			//and hash it into a Bitcoin address using either compressed or uncompressed public key
 			//This is the generated Bitcoin address, call it generatedaddress.
 			pubKey = isCompressed ? pubKey.Compress() : pubKey.Decompress();
+#endif
 
 			//call it generatedaddress.
 			var generatedaddress = pubKey.GetAddress(ScriptPubKeyType.Legacy, Network);

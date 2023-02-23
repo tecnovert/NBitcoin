@@ -12,13 +12,20 @@ namespace NBitcoin
 	/// </summary>
 	public class SlimChain
 	{
-		Dictionary<uint256, int> _HeightsByBlockHash = new Dictionary<uint256, int>();
-		uint256[] _BlockHashesByHeight = new uint256[1];
+		Dictionary<uint256, int> _HeightsByBlockHash;
+		uint256[] _BlockHashesByHeight;
 		int _Height;
 		ReaderWriterLock _lock = new ReaderWriterLock();
 
-		public SlimChain(uint256 genesis)
+		public SlimChain(uint256 genesis) : this(genesis, 1)
 		{
+		}
+		public SlimChain(uint256 genesis, int capacity)
+		{
+			if (capacity < 1)
+				throw new ArgumentOutOfRangeException(nameof(capacity), "Capacity should be 1 or more");
+			_BlockHashesByHeight = new uint256[capacity];
+			_HeightsByBlockHash = new Dictionary<uint256, int>(capacity);
 			_BlockHashesByHeight[0] = genesis;
 			_HeightsByBlockHash.Add(genesis, 0);
 			_Height = 0;
@@ -67,6 +74,22 @@ namespace NBitcoin
 			TrySetTip(Genesis, null);
 		}
 
+		public void SetCapacity(int capacity)
+		{
+			using (_lock.LockWrite())
+			{
+				if (capacity <= _BlockHashesByHeight.Length)
+					return;
+				var old = _BlockHashesByHeight;
+				_BlockHashesByHeight = new uint256[capacity];
+				Array.Copy(old, 0, _BlockHashesByHeight, 0, old.Length);
+				var oldd = _HeightsByBlockHash;
+				_HeightsByBlockHash = new Dictionary<uint256, int>(capacity);
+				foreach (var item in oldd)
+					_HeightsByBlockHash.Add(item.Key, item.Value);
+			}
+		}
+
 		/// <summary>
 		/// Set a new tip in the chain
 		/// </summary>
@@ -91,14 +114,14 @@ namespace NBitcoin
 
 			if (newTip == _BlockHashesByHeight[_Height])
 			{
-				if (newTip != _BlockHashesByHeight[0] && _BlockHashesByHeight[_Height - 1] != previous)
+				if (newTip != _BlockHashesByHeight[0] && _Height > 0 && _BlockHashesByHeight[_Height - 1] != previous)
 					throw new ArgumentException(message: "newTip is already inserted with a different previous block, this should never happen");
 				return true;
 			}
 
 			if (_HeightsByBlockHash.TryGetValue(newTip, out int newTipHeight))
 			{
-				if (newTipHeight - 1 >= 0 && _BlockHashesByHeight[newTipHeight - 1] != previous)
+				if (newTipHeight > 0 && _BlockHashesByHeight[newTipHeight - 1] != previous)
 					throw new ArgumentException(message: "newTip is already inserted with a different previous block, this should never happen");
 
 				if (newTipHeight == 0 && _BlockHashesByHeight[0] != newTip)
@@ -125,13 +148,16 @@ namespace NBitcoin
 				_BlockHashesByHeight[i] = null;
 			}
 			_Height = prevHeight + 1;
-			if (_BlockHashesByHeight.Length <= _Height)
-				Array.Resize(ref _BlockHashesByHeight, (int)((_Height + 100) * 1.1));
+			while (_BlockHashesByHeight.Length <= _Height)
+			{
+				var old = _BlockHashesByHeight;
+				_BlockHashesByHeight = new uint256[(int)((_BlockHashesByHeight.Length) * (_Height < 500_000 ? 2.0 : 1.1))];
+				Array.Copy(old, 0, _BlockHashesByHeight, 0, old.Length);
+			}
 			_BlockHashesByHeight[_Height] = newTip;
 			_HeightsByBlockHash.Add(newTip, _Height);
 			return true;
 		}
-
 		public BlockLocator GetTipLocator()
 		{
 			using (_lock.LockRead())

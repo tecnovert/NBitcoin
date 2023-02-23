@@ -4,15 +4,17 @@ using NBitcoin.Crypto;
 using NBitcoin.DataEncoders;
 using NBitcoin.OpenAsset;
 using NBitcoin.Policy;
-using NBitcoin.Stealth;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Threading.Tasks;
-using Builder = System.Func<NBitcoin.TransactionBuilder.TransactionBuildingContext, NBitcoin.IMoney?>;
-using AssetBuilder = System.Func<NBitcoin.TransactionBuilder.TransactionBuildingContext, NBitcoin.OpenAsset.AssetMoney?>;
+using Builder = System.Action<NBitcoin.TransactionBuilder.TransactionBuildingContext>;
+using AssetBuilder = System.Action<NBitcoin.TransactionBuilder.TransactionBuildingContext>;
+using System.Net.Http.Headers;
+using System.Text.RegularExpressions;
+using System.Diagnostics.CodeAnalysis;
 
 namespace NBitcoin
 {
@@ -28,6 +30,69 @@ namespace NBitcoin
 		IEnumerable<ICoin>? Select(IEnumerable<ICoin> coins, IMoney target);
 	}
 
+	public class SigningOptions
+	{
+		public SigningOptions()
+		{
+		}
+		public SigningOptions(SigHash sigHash)
+		{
+			SigHash = sigHash;
+			TaprootSigHash = (TaprootSigHash)sigHash;
+			if (sigHash == SigHash.All)
+				TaprootSigHash = TaprootSigHash.Default;
+		}
+		public SigningOptions(TaprootSigHash sigHash, TaprootReadyPrecomputedTransactionData precomputedTransactionData)
+		{
+			if (precomputedTransactionData is null)
+				throw new ArgumentNullException(nameof(precomputedTransactionData));
+			TaprootSigHash = sigHash;
+			SigHash = (SigHash)sigHash;
+			if (sigHash == TaprootSigHash.Default)
+				SigHash = SigHash.All;
+			PrecomputedTransactionData = precomputedTransactionData;
+		}
+		public SigningOptions(SigHash sigHash, bool useLowR)
+		{
+			SigHash = sigHash;
+			TaprootSigHash = (TaprootSigHash)sigHash;
+			if (sigHash == SigHash.All)
+				TaprootSigHash = TaprootSigHash.Default;
+			EnforceLowR = useLowR;
+		}
+
+		/// <summary>
+		/// What are we signing (default: SigHash.All)
+		/// </summary>
+		public SigHash SigHash { get; set; } = SigHash.All;
+		/// <summary>
+		/// What are we signing for taproot (default: SigHash.Default)
+		/// </summary>
+		public TaprootSigHash TaprootSigHash { get; set; } = TaprootSigHash.Default;
+		/// <summary>
+		/// Do we try to get shorter signatures? (default: true)
+		/// </summary>
+		public bool EnforceLowR { get; set; } = true;
+		/// <summary>
+		/// Providing the PrecomputedTransactionData speed up signing time, by pre computing one several hashes need
+		/// for the calculation of the signatures of every input.
+		/// 
+		/// For taproot transaction signing, the precomputed transaction data is required if some of the inputs does not
+		/// belong to the signer.
+		/// </summary>
+		public PrecomputedTransactionData? PrecomputedTransactionData { get; set; }
+		public SigningOptions Clone()
+		{
+			return new SigningOptions()
+			{
+				SigHash = SigHash,
+				EnforceLowR = EnforceLowR,
+				TaprootSigHash = TaprootSigHash,
+				PrecomputedTransactionData = PrecomputedTransactionData
+			};
+		}
+	}
+
 	/// <summary>
 	/// Algorithm implemented by bitcoin core https://github.com/bitcoin/bitcoin/blob/3015e0bca6bc2cb8beb747873fdf7b80e74d679f/src/wallet.cpp#L1276
 	/// Minimize the change
@@ -36,14 +101,17 @@ namespace NBitcoin
 	{
 		public DefaultCoinSelector()
 		{
-
+			_Rand = new Random();
 		}
-		Random _Rand = new Random();
+
+		Random? _Rand;
+
 		public DefaultCoinSelector(int seed)
 		{
 			_Rand = new Random(seed);
 		}
-		public DefaultCoinSelector(Random random)
+
+		public DefaultCoinSelector(Random? random)
 		{
 			_Rand = random;
 		}
@@ -56,7 +124,7 @@ namespace NBitcoin
 			get; set;
 		} = true;
 
-		public Money MinimumChange { get; set; } = Money.Coins(1.0m / 100);
+		public IMoney MinimumChange { get; set; } = Money.Coins(1.0m / 100);
 
 		#region ICoinSelector Members
 
@@ -88,8 +156,9 @@ namespace NBitcoin
 			OutputGroup? lowest_larger = null;
 			List<OutputGroup> applicable_groups = new List<OutputGroup>();
 			var nTotalLower = zero;
-			var targetMinChange = target.Add(MinimumChange);
-			Utils.Shuffle(groups, _Rand);
+			var targetMinChange = target.IsCompatible(MinimumChange) ? target.Add(MinimumChange) : target;
+			if (_Rand != null)
+				Utils.Shuffle(groups, _Rand);
 
 			foreach (var group in groups)
 			{
@@ -166,9 +235,12 @@ namespace NBitcoin
 			}
 		}
 #endif
-
+		/// <summary>
+		/// Number of iterations in the knapsack algorithm (Default: 100)
+		/// </summary>
+		public int Iterations { get; set; } = 100;
 		void ApproximateBestSubset(List<OutputGroup> groups, IMoney nTotalLower, IMoney nTargetValue,
-								  out bool[] vfBest, out IMoney nBest, int iterations = 1000)
+								  out bool[] vfBest, out IMoney nBest)
 		{
 			var zero = nTargetValue.Sub(nTargetValue);
 			vfBest = new bool[groups.Count];
@@ -180,7 +252,7 @@ namespace NBitcoin
 			bool[] vfIncluded = new bool[groups.Count];
 			nBest = nTotalLower;
 
-			for (int nRep = 0; nRep < iterations && nBest != nTargetValue; nRep++)
+			for (int nRep = 0; nRep < Iterations && nBest != nTargetValue; nRep++)
 			{
 #if NO_ARRAY_FILL
 				ArrayFill(vfIncluded, false);
@@ -199,7 +271,8 @@ namespace NBitcoin
 						//that the rng is fast. We do not use a constant random sequence,
 						//because there may be some privacy improvement by making
 						//the selection random.
-						if (nPass == 0 ? _Rand.Next(0, 2) == 0 : !vfIncluded[i])
+						if (nPass == 0 ? (_Rand is null || _Rand.Next(0, 2) == 0)
+							: !vfIncluded[i])
 						{
 							nTotal = nTotal.Add(groups[i].Amount);
 							vfIncluded[i] = true;
@@ -220,7 +293,7 @@ namespace NBitcoin
 			}
 		}
 
-#endregion
+		#endregion
 	}
 
 	/// <summary>
@@ -265,122 +338,164 @@ namespace NBitcoin
 		}
 	}
 
+	public class OutputTooSmallException : NotEnoughFundsException
+	{
+		public OutputTooSmallException(string message, string? group, IMoney missing) : base(message, group, missing)
+		{
+
+		}
+	}
+
 	/// <summary>
 	/// A class for building and signing all sort of transactions easily (http://www.codeproject.com/Articles/835098/NBitcoin-Build-Them-All)
 	/// </summary>
 	public class TransactionBuilder
 	{
-		internal class SignatureEvent
-		{
-			public SignatureEvent(PubKey pubKey, TransactionSignature sig, IndexedTxIn input)
-			{
-				Input = input;
-				PubKey = pubKey;
-				Signature = sig;
-			}
-			public PubKey PubKey;
-			public TransactionSignature Signature;
-			public IndexedTxIn Input;
-		}
 		internal class TransactionBuilderSigner : ISigner
 		{
-			private readonly TransactionSigningContext ctx;
-			ICoin coin;
-			SigHash sigHash;
-			IndexedTxIn txIn;
-			public TransactionBuilderSigner(TransactionSigningContext ctx, ICoin coin, SigHash sigHash, IndexedTxIn txIn)
+			private readonly InputSigningContext inputCtx;
+			public TransactionBuilderSigner(InputSigningContext ctx)
 			{
-				this.ctx = ctx;
-				this.coin = coin;
-				this.sigHash = sigHash;
-				this.txIn = txIn;
+				this.inputCtx = ctx;
 			}
-#region ISigner Members
+			#region ISigner Members
 
-			public List<SignatureEvent> EmittedSignatures { get; } = new List<SignatureEvent>();
-
-			public TransactionSignature Sign(PubKey pubKey)
+			public ITransactionSignature? Sign(IPubKey pubKey)
 			{
-				var key = ctx.FindKey(pubKey);
-				var sig = txIn.Sign(key, coin, sigHash, ctx.Builder.UseLowR);
-				EmittedSignatures.Add(new SignatureEvent(key.PubKey, sig, txIn));
-				return sig;
+				var keypair = inputCtx.CoinOptions?.KeyPair ?? inputCtx.TransactionContext.FindKey(pubKey);
+				if (keypair is null)
+					return null;
+				var indexedTxIn = inputCtx.Input.GetIndexedInput();
+#if HAS_SPAN
+				if (keypair is TaprootKeyPair tkp)
+				{
+					return indexedTxIn.SignTaprootKeySpend(tkp, inputCtx.Coin, inputCtx.TransactionContext.SigningOptions);
+				}
+#endif
+				return indexedTxIn.Sign(keypair.Key, inputCtx.Coin, inputCtx.TransactionContext.SigningOptions);
 			}
 
-#endregion
+			#endregion
+		}
+
+		class CompositeKeyRepository : IKeyRepository
+		{
+			public CompositeKeyRepository(IKeyRepository[] keyRepositories)
+			{
+				KeyRepositories = keyRepositories;
+			}
+
+			public IKeyRepository[] KeyRepositories { get; }
+
+			public IPubKey? FindKey(Script scriptPubKey)
+			{
+				return KeyRepositories
+						.Select(k => k.FindKey(scriptPubKey))
+						.Where(k => k != null)
+						.FirstOrDefault();
+			}
+		}
+		class CompositeSigner : ISigner
+		{
+			public CompositeSigner(ISigner[] signers)
+			{
+				Signers = signers;
+			}
+
+			public ISigner[] Signers { get; }
+
+			public ITransactionSignature? Sign(IPubKey key)
+			{
+				return Signers.Select(k => k.Sign(key))
+					.Where(k => k != null)
+					.FirstOrDefault();
+			}
 		}
 		internal class TransactionBuilderKeyRepository : IKeyRepository
 		{
-			TransactionSigningContext _Ctx;
-			public TransactionBuilderKeyRepository(TransactionSigningContext ctx)
+			InputSigningContext _Ctx;
+			public TransactionBuilderKeyRepository(InputSigningContext ctx)
 			{
 				_Ctx = ctx;
 			}
-#region IKeyRepository Members
+			#region IKeyRepository Members
 
-			public PubKey? FindKey(Script scriptPubkey)
+			public IPubKey? FindKey(Script scriptPubkey)
 			{
-				return _Ctx.FindKey(scriptPubkey)?.PubKey;
+				return _Ctx.CoinOptions?.KeyPair?.PubKey ?? _Ctx.TransactionContext.FindKey(scriptPubkey)?.PubKey;
 			}
 
-#endregion
+			#endregion
 		}
 
 		class KnownSignatureSigner : ISigner, IKeyRepository
 		{
 			private ICoin coin;
-			private IndexedTxIn txIn;
+			private PSBTInput txIn;
 			private readonly TransactionSigningContext signingContext;
-			private List<Tuple<PubKey, ECDSASignature, OutPoint>> _KnownSignatures;
-			private Dictionary<KeyId, ECDSASignature> _VerifiedSignatures = new Dictionary<KeyId, ECDSASignature>();
-
-			public List<SignatureEvent> EmittedSignatures { get; } = new List<SignatureEvent>();
-
-			public KnownSignatureSigner(TransactionSigningContext signingContext, List<Tuple<PubKey, ECDSASignature, OutPoint>> knownSignatures, ICoin coin, IndexedTxIn txIn)
+			private List<Tuple<IPubKey, ITransactionSignature, OutPoint>> _KnownSignatures;
+			private InputSigningContext inputCtx;
+			public KnownSignatureSigner(InputSigningContext inputSigningContext, List<Tuple<IPubKey, ITransactionSignature, OutPoint>> knownSignatures)
 			{
-				this.signingContext = signingContext;
+				this.signingContext = inputSigningContext.TransactionContext;
 				this._KnownSignatures = knownSignatures;
-				this.coin = coin;
-				this.txIn = txIn;
+				this.coin = inputSigningContext.Coin;
+				this.txIn = inputSigningContext.Input;
+				this.inputCtx = inputSigningContext;
 			}
 
-			public PubKey? FindKey(Script scriptPubKey)
+			public IPubKey? FindKey(Script scriptPubKey)
 			{
-				foreach (var tv in _KnownSignatures.Where(tv => signingContext.Builder.IsCompatibleKeyFromScriptCode(tv.Item1, scriptPubKey)))
+				foreach (var tv in _KnownSignatures.Where(tv => inputCtx.Extension.IsCompatibleKey(tv.Item1, scriptPubKey)))
 				{
 					if (tv.Item3 != null && coin.Outpoint != tv.Item3)
 						continue;
-					var hash = txIn.GetSignatureHash(coin, signingContext.SigHash);
-					if (tv.Item3 != null || tv.Item1.Verify(hash, tv.Item2))
-					{
-						EmittedSignatures.Add(new SignatureEvent(tv.Item1, new TransactionSignature(tv.Item2, signingContext.SigHash), txIn));
-						_VerifiedSignatures.AddOrReplace(tv.Item1.Hash, tv.Item2);
-						return tv.Item1;
-					}
+					return tv.Item1;
 				}
 				return null;
 			}
 
-			public TransactionSignature Sign(PubKey key)
+			public ITransactionSignature? Sign(IPubKey key)
 			{
-				return new TransactionSignature(_VerifiedSignatures[key.Hash], signingContext.SigHash);
+				foreach (var tv in _KnownSignatures.Where(k => k.Item1.Equals(key)))
+				{
+					if (tv.Item3 != null && coin.Outpoint != tv.Item3)
+						continue;
+					return tv.Item2;
+				}
+				return null;
 			}
 		}
 
 		internal class TransactionSigningContext
 		{
-			public TransactionSigningContext(TransactionBuilder builder, Transaction transaction, SigHash sigHash)
+			public TransactionSigningContext(TransactionBuilder builder, PSBT psbt, SigningOptions signingOptions)
+				: this(builder, psbt, null, psbt.GetSigningOptions(signingOptions))
+			{
+			}
+			public TransactionSigningContext(TransactionBuilder builder, Transaction transaction, SigningOptions signingOptions)
+				: this(builder, transaction.CreatePSBT(builder.Network), transaction, signingOptions)
+			{
+			}
+			public TransactionSigningContext(TransactionBuilder builder, PSBT psbt, Transaction? transaction, SigningOptions signingOptions)
 			{
 				Builder = builder;
 				Transaction = transaction;
-				if (transaction is IHasForkId hasForkId)
+				PSBT = psbt;
+				if (signingOptions.PrecomputedTransactionData is null)
 				{
-					sigHash = (SigHash)((uint)sigHash | 0x40u);
+					signingOptions = signingOptions.Clone();
+					var prevTxous = psbt.tx.Inputs.Select(txin => builder.FindCoin(txin.PrevOut)?.TxOut).ToArray();
+					if (prevTxous.All(p => p != null))
+						signingOptions.PrecomputedTransactionData = psbt.tx.PrecomputeTransactionData(prevTxous!);
+					else
+						signingOptions.PrecomputedTransactionData = psbt.tx.PrecomputeTransactionData();
 				}
-				SigHash = sigHash;
+				SigningOptions = signingOptions;
 			}
 
-			public Transaction Transaction
+			public PSBT PSBT { get; set; }
+			public Transaction? Transaction
 			{
 				get;
 				set;
@@ -391,65 +506,151 @@ namespace NBitcoin
 				set;
 			}
 
-			internal Key? FindKey(Script scriptPubKey)
+			internal KeyPair? FindKey(Script scriptPubKey)
+			{
+				var keypair = (Builder._Keys
+					.FirstOrDefault(k => Builder.IsCompatibleKeyFromScriptCode(k.PubKey, scriptPubKey)));
+				if (keypair is null && Builder.KeyFinder != null)
+				{
+					keypair = Builder.KeyFinder(scriptPubKey);
+				}
+				return keypair;
+			}
+			internal KeyPair? FindKey(IPubKey pubKey)
 			{
 				var key = Builder._Keys
-					.Concat(AdditionalKeys)
-					.FirstOrDefault(k => Builder.IsCompatibleKeyFromScriptCode(k.PubKey, scriptPubKey));
-				if (key == null && Builder.KeyFinder != null)
-				{
-					key = Builder.KeyFinder(scriptPubKey);
-				}
+					.FirstOrDefault(k => k.PubKey.Equals(pubKey));
 				return key;
 			}
-			internal Key FindKey(PubKey pubKey)
+			public SigningOptions SigningOptions { get; }
+			public uint? SignOnlyInputIndex { get; internal set; }
+
+			public InputSigningContext CreateInputContext(ICoin coin, PSBTInput input, TxIn? originalInput, BuilderExtension extension)
 			{
-				var key = Builder._Keys
-					.Concat(AdditionalKeys)
-					.FirstOrDefault(k => k.PubKey == pubKey);
-				return key;
+				return new InputSigningContext(this, coin, this.Builder.FindCoinOptions(coin.Outpoint), input, originalInput, extension);
 			}
 
-			private readonly List<Key> _AdditionalKeys = new List<Key>();
-			public List<Key> AdditionalKeys
+			public IEnumerable<InputSigningContext> GetInputSigningContexts()
 			{
-				get
+				foreach (var input in PSBT.Inputs)
 				{
-					return _AdditionalKeys;
+					if (SignOnlyInputIndex is uint i && i != input.Index)
+						continue;
+					ICoin? coin = null;
+					TxIn? txin = null;
+					coin = input.GetSignableCoin();
+					if (Transaction is null)
+					{
+						txin = null;
+						coin = coin ?? Builder.FindSignableCoin(input.TxIn);
+					}
+					else
+					{
+						txin = Transaction.Inputs[input.Index];
+						coin = coin ?? Builder.FindSignableCoin(txin);
+					}
+
+					if (coin is ICoin)
+					{
+						var ext = Builder.Extensions.FirstOrDefault(e => e.Match(coin, input));
+						if (ext is BuilderExtension)
+						{
+							input.UpdateFromCoin(coin);
+							yield return CreateInputContext(coin, input, txin, ext);
+						}
+					}
 				}
 			}
-
-			public SigHash SigHash
-			{
-				get;
-				set;
-			}
-
-			public List<SignatureEvent> SignatureEvents { get; set; } = new List<SignatureEvent>();
-			public uint? InputIndex { get; internal set; }
 		}
 		internal class TransactionBuildingContext
 		{
+			internal class GroupContext
+			{
+				public GroupContext(BuilderGroup builderGroup)
+				{
+					DustPreventionTotalRemoved = new MoneyBag();
+					LeftOverChange = new MoneyBag();
+					Group = builderGroup;
+					FixedFee = builderGroup.FixedFee.GetAmount(Money.Zero);
+					SentOutput = new MoneyBag();
+					if (builderGroup._Parent.StandardTransactionPolicy.MinFee is Money v)
+						MinFee = v;
+				}
+				/// <summary>
+				/// Additional change that should be swept to change later
+				/// </summary>
+				public MoneyBag LeftOverChange { get; set; }
+				/// <summary>
+				/// Total of output value that was removed via dust prevention mechanism
+				/// </summary>
+				public MoneyBag DustPreventionTotalRemoved { get; set; }
+				/// <summary>
+				/// What is curently sent
+				/// </summary>
+				public MoneyBag SentOutput { get; set; }
+				/// <summary>
+				/// The fee txout (change or substracted output)
+				/// </summary>
+				public TxOut? FeeTxOut { get; set; }
+				/// <summary>
+				/// Whether fee are already paid
+				/// </summary>
+				public bool FeePaid { get; set; }
+				/// <summary>
+				/// Fixed fee of SendFee
+				/// </summary>
+				public Money FixedFee { get; set; }
+				public MoneyBag Fee
+				{
+					get
+					{
+						return new MoneyBag(Money.Max(MinFee, FixedFee + SizeFee));
+					}
+				}
+				public TransactionBuilder.BuilderGroup Group { get; set; }
+				public List<ICoin> Selection { get; internal set; } = new List<ICoin>();
+				/// <summary>
+				/// Dogecoin has weird requirement.
+				/// </summary>
+				public Money MinFee { get; internal set; } = Money.Zero;
+				/// <summary>
+				/// Size fee is initially sent to 0 for the first pass.
+				/// Then we can do a second pass with the right Size fee.
+				/// </summary>
+				public Money SizeFee { get; set; } = Money.Zero;
+				/// <summary>
+				/// The minimum UTXO value to select
+				/// </summary>
+				public Money MinValue { get; set; } = Money.Zero;
+			}
 			public TransactionBuildingContext(TransactionBuilder builder)
 			{
+				Zero = Money.Zero;
 				Builder = builder;
 				Transaction = builder.Network.CreateTransaction();
-				AdditionalFees = Money.Zero;
-				Group = new BuilderGroup(builder);
-				ChangeAmount = Money.Zero;
+				// This group context is unused but it make sure we don't get NRE.
+				CurrentGroupContext = new GroupContext(new BuilderGroup(builder));
+				AddChangeTxOut = (a, ctx) => throw new InvalidOperationException("BUG in NBitcoin (AddChangeTxOut not set)");
 			}
+			public GroupContext CurrentGroupContext { get; set; }
 			public TransactionBuilder.BuilderGroup Group
-			{
-				get;
-				set;
-			}
-
-			private List<ICoin> _ConsumedCoins = new List<ICoin>();
-			public List<ICoin> ConsumedCoins
 			{
 				get
 				{
-					return _ConsumedCoins;
+					return CurrentGroupContext.Group;
+				}
+			}
+
+			public bool CanMergeOutputs { get; set; } = true;
+			public bool CanShuffleOutputs { get; set; } = true;
+			public bool CanShuffleInputs { get; set; } = true;
+
+			private HashSet<OutPoint> _ConsumedOutpoints = new HashSet<OutPoint>();
+			public HashSet<OutPoint> ConsumedOutpoints
+			{
+				get
+				{
+					return _ConsumedOutpoints;
 				}
 			}
 			public TransactionBuilder Builder
@@ -458,12 +659,6 @@ namespace NBitcoin
 				set;
 			}
 			public Transaction Transaction
-			{
-				get;
-				set;
-			}
-
-			public Money AdditionalFees
 			{
 				get;
 				set;
@@ -498,7 +693,7 @@ namespace NBitcoin
 				return txout;
 			}
 
-			public void Finish()
+			public void InsertOpenAssetMarker()
 			{
 				if (_Marker != null)
 				{
@@ -513,40 +708,13 @@ namespace NBitcoin
 				set;
 			}
 
-			public IMoney ChangeAmount
+			public Func<IMoney, TransactionBuildingContext, TxOut> AddChangeTxOut
 			{
 				get;
 				set;
 			}
 
-			public TransactionBuildingContext CreateMemento()
-			{
-				var memento = new TransactionBuildingContext(Builder);
-				memento.RestoreMemento(this);
-				return memento;
-			}
-
-			public void RestoreMemento(TransactionBuildingContext memento)
-			{
-				_Marker = memento._Marker == null ? null : new ColorMarker(memento._Marker.GetScript());
-				Transaction = memento.Transaction.Clone();
-				AdditionalFees = memento.AdditionalFees;
-				_ConsumedCoins = memento.ConsumedCoins.ToList();
-			}
-
-			public bool NonFinalSequenceSet
-			{
-				get;
-				set;
-			}
-
-			public IMoney? CoverOnly
-			{
-				get;
-				set;
-			}
-
-			public IMoney? Dust
+			public Func<Script, IMoney>? GetDust
 			{
 				get;
 				set;
@@ -557,33 +725,60 @@ namespace NBitcoin
 				get;
 				set;
 			}
+			public IEnumerable<ICoin> Selection => GroupContexts.SelectMany(g => g.Selection);
+			public IMoney Zero { get; internal set; }
+
+			public IEnumerable<GroupContext> GroupContexts => _GroupContexts.Values;
+
+			public bool SmallInputsExcluded { get; internal set; }
+
+			Dictionary<BuilderGroup, GroupContext> _GroupContexts = new Dictionary<BuilderGroup, GroupContext>();
+			public void SetGroup(BuilderGroup group)
+			{
+				if (_GroupContexts.TryGetValue(group, out var gctx))
+					CurrentGroupContext = gctx;
+				else
+				{
+					gctx = new GroupContext(group);
+					_GroupContexts.Add(group, gctx);
+				}
+				CurrentGroupContext = gctx;
+			}
+		}
+
+		internal class CoinWithOptions
+		{
+			public CoinWithOptions(ICoin coin, CoinOptions? options)
+			{
+				Coin = coin;
+				Options = options;
+			}
+
+			public ICoin Coin;
+			public CoinOptions? Options;
 		}
 
 		internal class BuilderGroup
 		{
-			TransactionBuilder _Parent;
+			internal TransactionBuilder _Parent;
 			public BuilderGroup(TransactionBuilder parent)
 			{
 				_Parent = parent;
 				FeeWeight = 1.0m;
-				Builders.Add(SetChange);
-			}
-
-			Money SetChange(TransactionBuildingContext ctx)
-			{
-				var changeAmount = (Money)ctx.ChangeAmount;
-				if (changeAmount.Satoshi == 0)
-					return Money.Zero;
-				ctx.Transaction.Outputs.Add(changeAmount, ctx.Group.ChangeScript[(int)ChangeType.Uncolored]);
-				return changeAmount;
 			}
 			internal List<Builder> Builders = new List<Builder>();
-			internal Dictionary<OutPoint, ICoin> Coins = new Dictionary<OutPoint, ICoin>();
+			internal Dictionary<OutPoint, CoinWithOptions> CoinsWithOptions = new Dictionary<OutPoint, CoinWithOptions>();
 			internal List<AssetBuilder> IssuanceBuilders = new List<AssetBuilder>();
 			internal Dictionary<AssetId, List<AssetBuilder>> BuildersByAsset = new Dictionary<AssetId, List<AssetBuilder>>();
 			internal Script[] ChangeScript = new Script[3];
 			internal bool sendAllToChange;
 			internal bool preventSetChange;
+			internal MoneyBag FixedFee = new MoneyBag();
+
+			internal IEnumerable<T> CoinsOfType<T>()
+			{
+				return CoinsWithOptions.Values.Select(coinWithOptions => coinWithOptions.Coin).OfType<T>();
+			}
 
 			internal void Shuffle()
 			{
@@ -597,10 +792,10 @@ namespace NBitcoin
 				Utils.Shuffle(builders, _Parent.ShuffleRandom);
 			}
 
-			public Money? CoverOnly
+			public CoinOptions? GetOptions(ICoin coin)
 			{
-				get;
-				set;
+				CoinsWithOptions.TryGetValue(coin.Outpoint, out var coinWithOptions);
+				return coinWithOptions?.Options;
 			}
 
 			public string? Name
@@ -609,11 +804,17 @@ namespace NBitcoin
 				set;
 			}
 
+			public FeeRate? FeeRate { get; set; }
 			public decimal FeeWeight
 			{
 				get;
 				set;
 			}
+			/// <summary>
+			/// Money which has been recovered from outputs that are too small to be included
+			/// we should be able to pay fees with that
+			/// </summary>
+			public Money SurrendedValue { get; set; } = Money.Zero;
 		}
 
 		List<BuilderGroup> _BuilderGroups = new List<BuilderGroup>();
@@ -650,6 +851,12 @@ namespace NBitcoin
 			Extensions.Add(new P2MultiSigBuilderExtension());
 			Extensions.Add(new P2PKBuilderExtension());
 			Extensions.Add(new OPTrueExtension());
+#if HAS_SPAN
+			if (Network.Consensus.SupportTaproot)
+			{
+				Extensions.Add(new TaprootKeySpendExtension());
+			}
+#endif
 		}
 
 		/// <summary>
@@ -680,6 +887,22 @@ namespace NBitcoin
 			get;
 			set;
 		}
+
+		/// <summary>
+		/// If true, the transaction builder tries to shuffle inputs
+		/// </summary>
+		public bool ShuffleInputs
+		{
+			get; set;
+		} = true;
+
+		/// <summary>
+		/// If true, the transaction builder tries to shuffles outputs
+		/// </summary>
+		public bool ShuffleOutputs
+		{
+			get; set;
+		} = true;
 
 		/// <summary>
 		/// If true and the transaction has two outputs sending to the same scriptPubKey, those will be merged into a single output. (Default: true)
@@ -719,40 +942,63 @@ namespace NBitcoin
 		/// <summary>
 		/// A callback used by the TransactionBuilder when it does not find the key for a scriptPubKey
 		/// </summary>
-		public Func<Script, Key>? KeyFinder
+		public Func<Script, KeyPair>? KeyFinder
 		{
 			get;
 			set;
 		}
 
-		LockTime? _LockTime;
+		LockTime _LockTime;
 		public TransactionBuilder SetLockTime(LockTime lockTime)
 		{
 			_LockTime = lockTime;
 			return this;
 		}
 
-		internal List<Key> _Keys = new List<Key>();
+		uint? _Version = 1;
+		public TransactionBuilder SetVersion(uint version)
+		{
+			_Version = version;
+			return this;
+		}
+
+		internal List<KeyPair> _Keys = new List<KeyPair>();
 
 		public TransactionBuilder AddKeys(params ISecret[] keys)
 		{
+			if (keys == null)
+				throw new ArgumentNullException(nameof(keys));
 			AddKeys(keys.Select(k => k.PrivateKey).ToArray());
 			return this;
 		}
 
 		public TransactionBuilder AddKeys(params Key[] keys)
 		{
-			_Keys.AddRange(keys);
-			foreach (var k in keys)
+			if (keys == null)
+				throw new ArgumentNullException(nameof(keys));
+			List<KeyPair> pairs = new List<KeyPair>(keys.Length * 2);
+#if HAS_SPAN
+			if (Network.Consensus.SupportTaproot)
+				pairs.AddRange(keys.Select(k => KeyPair.CreateTaprootPair(k)));
+#endif
+			pairs.AddRange(keys.Select(k => KeyPair.CreateECDSAPair(k)));
+			return AddKeys(pairs.ToArray());
+		}
+		public TransactionBuilder AddKeys(params KeyPair[] keyPairs)
+		{
+			if (keyPairs == null)
+				throw new ArgumentNullException(nameof(keyPairs));
+			_Keys.AddRange(keyPairs);
+			foreach (var pk in keyPairs.Select(k => k.PubKey).OfType<PubKey>())
 			{
-				AddKnownRedeems(k.PubKey.ScriptPubKey);
-				AddKnownRedeems(k.PubKey.WitHash.ScriptPubKey);
-				AddKnownRedeems(k.PubKey.Hash.ScriptPubKey);
+				AddKnownRedeems(pk.ScriptPubKey);
+				AddKnownRedeems(pk.WitHash.ScriptPubKey);
+				AddKnownRedeems(pk.Hash.ScriptPubKey);
 			}
 			return this;
 		}
 
-		public TransactionBuilder AddKnownSignature(PubKey pubKey, TransactionSignature signature, OutPoint signedOutpoint)
+		public TransactionBuilder AddKnownSignature(IPubKey pubKey, ITransactionSignature signature, OutPoint signedOutpoint)
 		{
 			if (pubKey == null)
 				throw new ArgumentNullException(nameof(pubKey));
@@ -760,30 +1006,42 @@ namespace NBitcoin
 				throw new ArgumentNullException(nameof(signature));
 			if (signedOutpoint == null)
 				throw new ArgumentNullException(nameof(signedOutpoint));
-			_KnownSignatures.Add(Tuple.Create(pubKey, signature.Signature, signedOutpoint));
-			return this;
-		}
-
-		public TransactionBuilder AddKnownSignature(PubKey pubKey, ECDSASignature signature, OutPoint signedOutpoint)
-		{
-			if (pubKey == null)
-				throw new ArgumentNullException(nameof(pubKey));
-			if (signature == null)
-				throw new ArgumentNullException(nameof(signature));
 			_KnownSignatures.Add(Tuple.Create(pubKey, signature, signedOutpoint));
 			return this;
 		}
 
-		public TransactionBuilder AddCoins(params ICoin[] coins)
+		public TransactionBuilder SetOptInRBF(bool rbf)
 		{
-			return AddCoins((IEnumerable<ICoin>)coins);
+			OptInRBF = rbf;
+			return this;
 		}
 
-		public TransactionBuilder AddCoins(IEnumerable<ICoin> coins)
+		public TransactionBuilder AddCoin(ICoin coin)
+		{
+			return AddCoin(coin, new CoinOptions());
+		}
+
+		public TransactionBuilder AddCoin(ICoin coin, CoinOptions? options)
+		{
+			if (coin == null)
+				throw new ArgumentNullException(nameof(coin));
+			if (coin.TxOut.ScriptPubKey.IsUnspendable)
+				throw new InvalidOperationException("You cannot add an unspendable coin");
+			CurrentGroup.CoinsWithOptions.AddOrReplace(coin.Outpoint, new CoinWithOptions(coin, options));
+			return this;
+		}
+
+		public TransactionBuilder AddCoins(params ICoin?[] coins)
+		{
+			return AddCoins((IEnumerable<ICoin?>)coins);
+		}
+
+		public TransactionBuilder AddCoins(IEnumerable<ICoin?> coins)
 		{
 			foreach (var coin in coins)
 			{
-				CurrentGroup.Coins.AddOrReplace(coin.Outpoint, coin);
+				if (coin is ICoin)
+					AddCoin(coin);
 			}
 			return this;
 		}
@@ -805,11 +1063,6 @@ namespace NBitcoin
 			CurrentGroup.Name = groupName;
 			return this;
 		}
-
-		/// <summary>
-		/// Do we try to get shorter signatures? (default: true)
-		/// </summary>
-		public bool UseLowR { get; set; } = true;
 
 		/// <summary>
 		/// Send bitcoins to a destination
@@ -846,7 +1099,7 @@ namespace NBitcoin
 		{
 			if (scriptPubKey == null)
 				throw new ArgumentNullException(nameof(scriptPubKey));
-			var totalInput = CurrentGroup.Coins.Values.OfType<Coin>().Sum(coin => coin.Amount);
+			var totalInput = CurrentGroup.CoinsOfType<Coin>().Sum(coin => coin.Amount);
 			return Send(scriptPubKey, totalInput).SubtractFees();
 		}
 
@@ -903,32 +1156,60 @@ namespace NBitcoin
 			_LastSendBuilder = null; //If the amount is dust, we don't want the fee to be paid by the previous Send
 			if (DustPrevention && amount < GetDust(scriptPubKey) && !_OpReturnTemplate.CheckScriptPubKey(scriptPubKey))
 			{
-				SendFees(amount);
+				CurrentGroup.SurrendedValue += amount;
 				return this;
 			}
 
-			var builder = new SendBuilder(CreateTxOut(amount, scriptPubKey));
+			var builder = new SendBuilder(this, amount, scriptPubKey);
 			CurrentGroup.Builders.Add(builder.Build);
 			_LastSendBuilder = builder;
 			return this;
 		}
 
 		SendBuilder? _LastSendBuilder;
-		SendBuilder? _SubstractFeeBuilder;
 
-		class SendBuilder
+		internal class SendBuilder
 		{
-			internal TxOut _TxOut;
+			private readonly TransactionBuilder parent;
+			private readonly Money amount;
+			private readonly Script scriptPubKey;
+			public bool SubstractFee { get; set; }
 
-			public SendBuilder(TxOut txout)
+			public SendBuilder(TransactionBuilder parent, Money amount, Script scriptPubKey)
 			{
-				_TxOut = txout;
+				this.parent = parent;
+				this.amount = amount;
+				this.scriptPubKey = scriptPubKey;
 			}
 
-			public Money Build(TransactionBuildingContext ctx)
+			public void Build(TransactionBuildingContext ctx)
 			{
-				ctx.Transaction.Outputs.Add(_TxOut);
-				return _TxOut.Value;
+				var txout = parent.CreateTxOut(amount, scriptPubKey);
+				if (SubstractFee && !ctx.CurrentGroupContext.FeePaid)
+				{
+					var fee = ctx.CurrentGroupContext.Fee.GetAmount(Money.Zero);
+					txout.Value -= fee;
+
+					var minimumTxOutValue = (parent.DustPrevention ? parent.GetDust(txout.ScriptPubKey) : Money.Zero);
+					if (txout.Value < Money.Zero)
+					{
+						throw new OutputTooSmallException("Can't substract fee from this output because the amount is too small",
+						ctx.Group.Name,
+						-txout.Value
+						);
+					}
+					ctx.CurrentGroupContext.FeePaid = true;
+					if (txout.Value < minimumTxOutValue)
+					{
+						// Between zero and dust, should strip this output.
+						ctx.CurrentGroupContext.DustPreventionTotalRemoved += txout.Value;
+						return;
+					}
+					ctx.CurrentGroupContext.FeeTxOut = txout;
+				}
+
+				ctx.CurrentGroupContext.SentOutput += txout.Value;
+				ctx.Transaction.Outputs.Add(txout);
 			}
 		}
 
@@ -940,7 +1221,7 @@ namespace NBitcoin
 		{
 			if (_LastSendBuilder == null)
 				throw new InvalidOperationException("No call to TransactionBuilder.Send has been done which can support the fees");
-			_SubstractFeeBuilder = _LastSendBuilder;
+			_LastSendBuilder.SubstractFee = true;
 			return this;
 		}
 
@@ -967,7 +1248,7 @@ namespace NBitcoin
 			if (amount is MoneyBag bag)
 			{
 				foreach (var money in bag)
-					Send(scriptPubKey, amount);
+					Send(scriptPubKey, money);
 				return this;
 			}
 			if (amount is Money coinAmount)
@@ -999,16 +1280,9 @@ namespace NBitcoin
 			return SendAsset(destination, new AssetMoney(assetId, quantity));
 		}
 
-		[Obsolete("Transaction builder is automatically shuffled")]
-		public TransactionBuilder Shuffle()
+		private void DoShuffleGroups()
 		{
-			DoShuffle();
-			return this;
-		}
-
-		private void DoShuffle()
-		{
-			if (ShuffleRandom != null)
+			if (ShuffleRandom != null && ShuffleOutputs)
 			{
 				Utils.Shuffle(_BuilderGroups, ShuffleRandom);
 				foreach (var group in _BuilderGroups)
@@ -1016,17 +1290,22 @@ namespace NBitcoin
 			}
 		}
 
-		AssetMoney SetColoredChange(TransactionBuildingContext ctx)
+		TxOut SetColoredChange(IMoney changeAmount, TransactionBuildingContext ctx)
 		{
-			var changeAmount = (AssetMoney)ctx.ChangeAmount;
-			if (changeAmount.Quantity == 0)
-				return changeAmount;
 			var marker = ctx.GetColorMarker(false);
 			var script = ctx.Group.ChangeScript[(int)ChangeType.Colored];
 			var txout = ctx.Transaction.Outputs.Add(GetDust(script), script);
-			marker.SetQuantity(ctx.Transaction.Outputs.Count - 2, changeAmount.Quantity);
-			ctx.AdditionalFees += txout.Value;
-			return changeAmount;
+			marker.SetQuantity(ctx.Transaction.Outputs.Count - 2, ((AssetMoney)changeAmount).Quantity);
+			ctx.CurrentGroupContext.SentOutput += txout.Value;
+			ctx.CanMergeOutputs = false;
+			ctx.CanShuffleOutputs = false;
+			return txout;
+		}
+		TxOut SetChange(IMoney changeAmount, TransactionBuildingContext ctx)
+		{
+			var txout = ctx.Transaction.Outputs.CreateNewTxOut((Money)changeAmount, ctx.Group.ChangeScript[(int)ChangeType.Uncolored]);
+			ctx.Transaction.Outputs.Add(txout);
+			return txout;
 		}
 
 		public TransactionBuilder SendAsset(Script scriptPubKey, AssetId assetId, ulong assetQuantity)
@@ -1046,15 +1325,16 @@ namespace NBitcoin
 			{
 				builders = new List<AssetBuilder>();
 				CurrentGroup.BuildersByAsset.Add(asset.Id, builders);
-				builders.Add(SetColoredChange);
 			}
 			builders.Add(ctx =>
 			{
 				var marker = ctx.GetColorMarker(false);
 				var txout = ctx.Transaction.Outputs.Add(GetDust(scriptPubKey), scriptPubKey);
 				marker.SetQuantity(ctx.Transaction.Outputs.Count - 2, asset.Quantity);
-				ctx.AdditionalFees += txout.Value;
-				return asset;
+				ctx.CurrentGroupContext.SentOutput += txout.Value;
+				ctx.CurrentGroupContext.SentOutput += asset;
+				ctx.CanMergeOutputs = false;
+				ctx.CanShuffleOutputs = false;
 			});
 			return this;
 		}
@@ -1067,7 +1347,7 @@ namespace NBitcoin
 		{
 			if (StandardTransactionPolicy == null || StandardTransactionPolicy.MinRelayTxFee == null)
 				return Money.Zero;
-			return CreateTxOut(Money.Zero, script).GetDustThreshold(StandardTransactionPolicy.MinRelayTxFee);
+			return CreateTxOut(Money.Zero, script).GetDustThreshold();
 		}
 
 		/// <summary>
@@ -1101,25 +1381,6 @@ namespace NBitcoin
 			}
 		}
 
-		public TransactionBuilder Send(BitcoinStealthAddress address, Money amount, Key? ephemKey = null)
-		{
-			if (amount < Money.Zero)
-				throw new ArgumentOutOfRangeException(nameof(amount), "amount can't be negative");
-
-			if (_OpReturnUser == null)
-				_OpReturnUser = "Stealth Payment";
-			else
-				throw new InvalidOperationException("Op return already used for " + _OpReturnUser);
-
-			CurrentGroup.Builders.Add(ctx =>
-			{
-				var payment = address.CreatePayment(ephemKey);
-				payment.AddToTransaction(ctx.Transaction, amount);
-				return amount;
-			});
-			return this;
-		}
-
 		public TransactionBuilder IssueAsset(IDestination destination, AssetMoney asset)
 		{
 			return IssueAsset(destination.ScriptPubKey, asset);
@@ -1134,20 +1395,20 @@ namespace NBitcoin
 				_IssuedAsset = asset.Id;
 			else if (_IssuedAsset != asset.Id)
 				throw new InvalidOperationException("You can issue only one asset type in a transaction");
-
 			CurrentGroup.IssuanceBuilders.Add(ctx =>
 			{
 				var marker = ctx.GetColorMarker(true);
 				if (ctx.IssuanceCoin == null)
 				{
-					var issuance = ctx.Group.Coins.Values.OfType<IssuanceCoin>().Where(i => i.AssetId == asset.Id).FirstOrDefault();
+					var issuance = ctx.Group.CoinsOfType<IssuanceCoin>().Where(i => i.AssetId == asset.Id).FirstOrDefault();
 					if (issuance == null)
 						throw new InvalidOperationException("No issuance coin for emitting asset found");
 					ctx.IssuanceCoin = issuance;
 					var input = ctx.Transaction.Inputs.CreateNewTxIn();
 					input.PrevOut = issuance.Outpoint;
 					ctx.Transaction.Inputs.Insert(0, input);
-					ctx.AdditionalFees -= issuance.Bearer.Amount;
+					ctx.ConsumedOutpoints.Add(issuance.Outpoint);
+					ctx.CurrentGroupContext.LeftOverChange += issuance.Bearer.Amount;
 					if (issuance.DefinitionUrl != null)
 					{
 						marker.SetMetadataUrl(issuance.DefinitionUrl);
@@ -1156,20 +1417,48 @@ namespace NBitcoin
 
 				ctx.Transaction.Outputs.Insert(0, CreateTxOut(GetDust(scriptPubKey), scriptPubKey));
 				marker.Quantities = new[] { checked((ulong)asset.Quantity) }.Concat(marker.Quantities).ToArray();
-				ctx.AdditionalFees += ctx.Transaction.Outputs[0].Value;
-				return asset;
+				ctx.CurrentGroupContext.SentOutput += ctx.Transaction.Outputs[0].Value;
+				ctx.CurrentGroupContext.SentOutput += asset;
+				ctx.CanShuffleOutputs = false;
+				ctx.CanMergeOutputs = false;
 			});
 			return this;
 		}
+		public TransactionBuilder SetSigningOptions(SigningOptions? signingOptions)
+		{
+			if (signingOptions == null)
+				throw new ArgumentNullException(nameof(signingOptions));
+			this.signingOptions = signingOptions ?? new SigningOptions();
+			return this;
+		}
+		public TransactionBuilder SetSigningOptions(SigHash sigHash)
+		{
+			this.signingOptions = new SigningOptions(sigHash);
+			return this;
+		}
+		public TransactionBuilder SetSigningOptions(SigHash sigHash, bool enforceLowR)
+		{
+			this.signingOptions = new SigningOptions(sigHash, enforceLowR);
+			return this;
+		}
 
-		public bool TrySignInput(Transaction transaction, uint index, SigHash sigHash, out TransactionSignature? signature)
+		public bool TrySignInput(Transaction transaction, uint index, [MaybeNullWhen(false)] out ITransactionSignature signature)
 		{
 			if (transaction == null)
 				throw new ArgumentNullException(nameof(transaction));
-			var ctx = new TransactionSigningContext(this, transaction.Clone(), sigHash);
-			ctx.InputIndex = index;
-			this.SignTransactionInPlace(ctx);
-			signature = ctx.SignatureEvents.FirstOrDefault()?.Signature;
+			var ctx = new TransactionSigningContext(this, transaction.Clone(), signingOptions);
+			ctx.SignOnlyInputIndex = index;
+			this.SignTransactionContext(ctx);
+			var input = ctx.PSBT.Inputs[(int)index];
+			signature = input.PartialSigs.Select(p => p.Value).FirstOrDefault();
+			if (signature is null)
+			{
+				signature = input.TaprootKeySignature;
+			}
+			if (signature is null)
+			{
+				// TODO: Add PSBT_IN_TAP_SCRIPT_SIG
+			}
 			return signature != null;
 		}
 
@@ -1177,12 +1466,9 @@ namespace NBitcoin
 		{
 			if (fees == null)
 				throw new ArgumentNullException(nameof(fees));
-			CurrentGroup.Builders.Add(ctx => fees);
-			_TotalFee += fees;
+			CurrentGroup.FixedFee += fees;
 			return this;
 		}
-
-		Money _TotalFee = Money.Zero;
 
 		/// <summary>
 		/// Split the estimated fees across the several groups (separated by Then())
@@ -1192,8 +1478,7 @@ namespace NBitcoin
 		public TransactionBuilder SendEstimatedFees(FeeRate feeRate)
 		{
 			FilterUneconomicalCoinsRate = feeRate;
-			var fee = EstimateFees(feeRate);
-			SendFees(fee);
+			CurrentGroup.FeeRate = feeRate;
 			return this;
 		}
 
@@ -1205,8 +1490,21 @@ namespace NBitcoin
 		public TransactionBuilder SendEstimatedFeesSplit(FeeRate feeRate)
 		{
 			FilterUneconomicalCoinsRate = feeRate;
-			var fee = EstimateFees(feeRate);
-			SendFeesSplit(fee);
+			var lastGroup = CurrentGroup; //Make sure at least one group exists
+			var totalWeight = _BuilderGroups.Select(b => b.FeeWeight).Sum();
+			Money totalSent = Money.Zero;
+			var fees = feeRate.GetFee(1000);
+			foreach (var group in _BuilderGroups)
+			{
+				var groupFee = Money.Satoshis((group.FeeWeight / totalWeight) * fees.Satoshi);
+				totalSent += groupFee;
+				if (_BuilderGroups.Last() == group)
+				{
+					var leftOver = fees - totalSent;
+					groupFee += leftOver;
+				}
+				group.FeeRate = new FeeRate(groupFee, 1000);
+			}
 			return this;
 		}
 
@@ -1231,7 +1529,7 @@ namespace NBitcoin
 					var leftOver = fees - totalSent;
 					groupFee += leftOver;
 				}
-				group.Builders.Add(ctx => groupFee);
+				group.FixedFee += groupFee;
 			}
 			return this;
 		}
@@ -1285,24 +1583,13 @@ namespace NBitcoin
 		/// Build a PSBT (Partially signed bitcoin transaction)
 		/// </summary>
 		/// <param name="sign">True if signs all inputs with the available keys</param>
+		/// <param name="sigHash">The sighash for signing (ignored if sign is false)</param>
 		/// <returns>A PSBT</returns>
 		/// <exception cref="NBitcoin.NotEnoughFundsException">Not enough funds are available</exception>
 		public PSBT BuildPSBT(bool sign)
 		{
-			return BuildPSBT(sign, SigHash.All);
-		}
-
-		/// <summary>
-		/// Build a PSBT (Partially signed bitcoin transaction)
-		/// </summary>
-		/// <param name="sign">True if signs all inputs with the available keys</param>
-		/// <param name="sigHash">The sighash for signing (ignored if sign is false)</param>
-		/// <returns>A PSBT</returns>
-		/// <exception cref="NBitcoin.NotEnoughFundsException">Not enough funds are available</exception>
-		public PSBT BuildPSBT(bool sign, SigHash sigHash)
-		{
-			var tx = BuildTransaction(false, sigHash);
-			return CreatePSBTFromCore(tx, sign, sigHash);
+			var tx = BuildTransaction(false);
+			return CreatePSBTFromCore(tx, sign);
 		}
 
 		/// <summary>
@@ -1310,50 +1597,87 @@ namespace NBitcoin
 		/// </summary>
 		/// <param name="tx">The transaction</param>
 		/// <param name="sign">If true, the transaction builder will sign this transaction</param>
-		/// <param name="sigHash">The sighash for signing (ignored if sign is false)</param>
 		/// <returns></returns>
-		public PSBT CreatePSBTFrom(Transaction tx, bool sign, SigHash sigHash)
+		public PSBT CreatePSBTFrom(Transaction tx, bool sign)
 		{
 			if (tx == null)
 				throw new ArgumentNullException(nameof(tx));
-			return CreatePSBTFromCore(tx.Clone(), sign, sigHash);
+			return CreatePSBTFromCore(tx.Clone(), sign);
 		}
 
-		PSBT CreatePSBTFromCore(Transaction tx, bool sign, SigHash sigHash)
+		PSBT CreatePSBTFromCore(Transaction tx, bool sign)
 		{
-			TransactionSigningContext signingContext = new TransactionSigningContext(this, tx, sigHash);
+			TransactionSigningContext signingContext = new TransactionSigningContext(this, tx, signingOptions);
 			if (sign)
-				SignTransactionInPlace(signingContext);
-			var psbt = tx.CreatePSBT(Network);
+				SignTransactionContext(signingContext);
+			var psbt = signingContext.PSBT;
 			UpdatePSBT(psbt);
-			if (sign)
-				UpdatePSBTSignatures(psbt, signingContext);
 			return psbt;
-		}
-
-		private static void UpdatePSBTSignatures(PSBT psbt, TransactionSigningContext signingContext)
-		{
-			foreach (var signature in signingContext.SignatureEvents)
-			{
-				var psbtInput = psbt.Inputs.FindIndexedInput(signature.Input.PrevOut);
-				psbtInput.PartialSigs.TryAdd(signature.PubKey, signature.Signature);
-			}
 		}
 
 		public TransactionBuilder SignPSBT(PSBT psbt)
 		{
-			SignPSBT(psbt, SigHash.All);
-			return this;
-		}
-		public TransactionBuilder SignPSBT(PSBT psbt, SigHash sigHash)
-		{
 			if (psbt == null)
 				throw new ArgumentNullException(nameof(psbt));
-			AddCoins(psbt);
-			var tx = psbt.GetOriginalTransaction();
-			var signingContext = new TransactionSigningContext(this, tx, sigHash);
-			SignTransactionInPlace(signingContext);
-			UpdatePSBTSignatures(psbt, signingContext);
+			var signingContext = new TransactionSigningContext(this, psbt.Clone(), signingOptions);
+			SignTransactionContext(signingContext);
+			psbt.Combine(signingContext.PSBT);
+			return this;
+		}
+
+		public TransactionBuilder SignPSBTInput(PSBTInput psbtInput)
+		{
+			if (psbtInput == null)
+				throw new ArgumentNullException(nameof(psbtInput));
+			var psbt = psbtInput.PSBT;
+			var signingContext = new TransactionSigningContext(this, psbt, signingOptions)
+			{
+				SignOnlyInputIndex = psbtInput.Index
+			};
+			SignTransactionContext(signingContext);
+			return this;
+		}
+
+		public TransactionBuilder FinalizePSBT(PSBT psbt)
+		{
+			if (psbt is null)
+				throw new ArgumentNullException(nameof(psbt));
+			var signingContext = new TransactionSigningContext(this, psbt.Clone(), signingOptions);
+			FinalizeTransactionContext(signingContext);
+			psbt.Combine(signingContext.PSBT);
+			return this;
+		}
+
+		public TransactionBuilder FinalizePSBTInput(PSBTInput psbtInput)
+		{
+			if (psbtInput is null)
+				throw new ArgumentNullException(nameof(psbtInput));
+			var psbt = psbtInput.PSBT;
+			var tx = psbt.Settings.IsSmart && (!Script.IsNullOrEmpty(psbtInput.originalScriptSig) ||
+					 !WitScript.IsNullOrEmpty(psbtInput.originalWitScript)) ? psbt.GetOriginalTransaction() : null;
+			var signingContext = new TransactionSigningContext(this, psbtInput.PSBT, tx, signingOptions)
+			{
+				SignOnlyInputIndex = psbtInput.Index
+			};
+			FinalizeTransactionContext(signingContext);
+			return this;
+		}
+
+		/// <summary>
+		/// Try to extract the signatures from <paramref name="transaction"/> into the <paramref name="psbt"/>.
+		/// </summary>
+		/// <param name="psbt">The PSBT to extract signatures to.</param>
+		/// <param name="transaction">The transaction from which signatures will get extracted.</param>
+		/// <returns></returns>
+		public TransactionBuilder ExtractSignatures(PSBT psbt, Transaction transaction)
+		{
+			if (psbt is null)
+				throw new ArgumentNullException(nameof(psbt));
+			if (transaction is null)
+				throw new ArgumentNullException(nameof(transaction));
+			var signingContext = new TransactionSigningContext(this, transaction, signingOptions);
+			ExtractExistingSignatures(signingContext);
+			psbt.Combine(signingContext.PSBT);
 			return this;
 		}
 
@@ -1368,12 +1692,12 @@ namespace NBitcoin
 			var tx = psbt.GetOriginalTransaction();
 			psbt.AddCoins(tx.Inputs.AsIndexedInputs()
 				.Select(i => this.FindSignableCoin(i) ?? this.FindCoin(i.PrevOut))
-				.Where(c => c != null)
 				.ToArray());
 
 			psbt.AddScripts(_ScriptPubKeyToRedeem.Values.ToArray());
 			return this;
 		}
+
 		/// <summary>
 		/// Build the transaction
 		/// </summary>
@@ -1382,77 +1706,153 @@ namespace NBitcoin
 		/// <exception cref="NBitcoin.NotEnoughFundsException">Not enough funds are available</exception>
 		public Transaction BuildTransaction(bool sign)
 		{
-			return BuildTransaction(sign, SigHash.All);
-		}
-
-		/// <summary>
-		/// Build the transaction
-		/// </summary>
-		/// <param name="sign">True if signs all inputs with the available keys</param>
-		/// <param name="sigHash">The type of signature</param>
-		/// <returns>The transaction</returns>
-		/// <exception cref="NBitcoin.NotEnoughFundsException">Not enough funds are available</exception>
-		public Transaction BuildTransaction(bool sign, SigHash sigHash)
-		{
-			DoShuffle();
-		retry:
+			int totalRepass = 5;
+			DoShuffleGroups();
 			TransactionBuildingContext ctx = new TransactionBuildingContext(this);
-			if (_CompletedTransaction != null)
-				ctx.Transaction = _CompletedTransaction.Clone();
-			if (_LockTime != null)
-				ctx.Transaction.LockTime = _LockTime.Value;
+			retry:
+			ctx.Transaction.LockTime = _LockTime;
+			if (_Version is uint v)
+				ctx.Transaction.Version = v;
 			foreach (var group in _BuilderGroups)
 			{
-				ctx.Group = group;
-				ctx.AdditionalFees = Money.Zero;
-
+				ctx.SetGroup(group);
 				ctx.ChangeType = ChangeType.Colored;
+				ctx.AddChangeTxOut = SetColoredChange;
 				foreach (var builder in group.IssuanceBuilders)
 					builder(ctx);
 
 				var buildersByAsset = group.BuildersByAsset.ToList();
 				foreach (var builders in buildersByAsset)
 				{
-					var coins = group.Coins.Values.OfType<ColoredCoin>().Where(c => c.Amount.Id == builders.Key);
-
-					ctx.Dust = new AssetMoney(builders.Key);
-					ctx.CoverOnly = null;
-					ctx.ChangeAmount = new AssetMoney(builders.Key);
-					var btcSpent = BuildTransaction(ctx, group, builders.Value, coins, new AssetMoney(builders.Key))
-						.OfType<IColoredCoin>().Select(c => c.Bearer.Amount).Sum();
-					ctx.AdditionalFees -= btcSpent;
+					ctx.Zero = new AssetMoney(builders.Key);
+					var coins = group.CoinsOfType<ColoredCoin>().Where(c => c.Amount.Id == builders.Key);
+					ctx.GetDust = null;
+					var btcSpent = BuildTransaction(ctx, group, builders.Value, coins)
+									.OfType<IColoredCoin>().Select(c => c.Bearer.Amount).Sum();
+					ctx.CurrentGroupContext.LeftOverChange += btcSpent;
 				}
-
-				ctx.Dust = GetDust();
-				ctx.ChangeAmount = Money.Zero;
-				ctx.CoverOnly = group.CoverOnly;
+				ctx.GetDust = GetDust;
+				ctx.Zero = Money.Zero;
 				ctx.ChangeType = ChangeType.Uncolored;
 
 				var builderList = group.Builders.ToList();
-				ModifyBuildersForSubstractFees(ctx, group, builderList);
-				builderList.Add(ctxx => ctxx.AdditionalFees);
-				BuildTransaction(ctx, group, builderList, group.Coins.Values.OfType<Coin>().Where(IsEconomical), Money.Zero);
-			}
-			ctx.Finish();
-
-			if (sign)
-			{
-				SignTransactionInPlace(ctx.Transaction, sigHash);
+				ctx.AddChangeTxOut = SetChange;
+				BuildTransaction(ctx, group, builderList, group.CoinsOfType<Coin>()
+															   .Where(c => c.Amount >= ctx.CurrentGroupContext.MinValue)
+															   .Where(IsEconomical));
 			}
 
-			// Make some adjustments if we need to send more fees
-			if (StandardTransactionPolicy.MinFee != null)
+			if (ShuffleRandom != null)
 			{
-				var consumed = ctx.ConsumedCoins.ToArray();
-				var fee = ctx.Transaction.GetFee(consumed);
-				if (fee != null && fee < StandardTransactionPolicy.MinFee)
+				if (ShuffleInputs && ctx.CanShuffleInputs)
+					Utils.Shuffle(ctx.Transaction.Inputs,
+								0,
+								ShuffleRandom);
+				if (ShuffleOutputs && ctx.CanShuffleOutputs)
+					Utils.Shuffle(ctx.Transaction.Outputs,
+								0,
+								ShuffleRandom);
+			}
+			if (MergeOutputs && ctx.CanMergeOutputs)
+			{
+				var collapsedOutputs = ctx.Transaction.Outputs
+							   .GroupBy(o => o.ScriptPubKey)
+							   .Select(o => o.Count() == 1 ? o.First() : ctx.Transaction.Outputs.CreateNewTxOut(o.Select(txout => txout.Value).Sum(), o.Key))
+							   .ToArray();
+				if (collapsedOutputs.Length < ctx.Transaction.Outputs.Count)
 				{
-					SendFees(StandardTransactionPolicy.MinFee - fee);
-					goto retry;
+					ctx.Transaction.Outputs.Clear();
+					ctx.Transaction.Outputs.AddRange(collapsedOutputs);
+				}
+			}
+			ctx.InsertOpenAssetMarker();
+			AfterBuild(ctx.Transaction);
+
+			// The first pass always have SizeFee to 0 because we can't
+			// know them before we can get a reasonable guess of transaction
+			// size.
+			bool needRepass = false;
+			var estimatedSize = this.EstimateSize(ctx.Transaction, true);
+			var consumed = ctx.ConsumedOutpoints.Select(c => FindCoin(c)).Where(c => c != null).ToArray();
+			var fee = ctx.Transaction.GetFee(consumed);
+			if (fee is null)
+				throw new InvalidOperationException("Can't get fee after transaction building, this should never happen. (contact NBitcoin's authors if you see this)");
+			foreach (var gctx in ctx.GroupContexts)
+			{
+				var oldSizeFee = gctx.SizeFee;
+				var newSizeFee = gctx.Group.FeeRate?.GetFee(estimatedSize);
+				if (newSizeFee != null)
+				{
+					gctx.SizeFee = newSizeFee;
+					var additionalFee = newSizeFee - oldSizeFee;
+					if (additionalFee < Money.Zero)
+					{
+						// If the size decreased, try to give more money back to the fee output
+						// so we don't have to do a repass every times a coin selector
+						// is choosing a slightly different coin set.
+						if (gctx.FeeTxOut is TxOut txout)
+						{
+							txout.Value += -additionalFee;
+						}
+						// No change, so we can't give back money. Though, let's make sure
+						// we don't do infinite loop for peanuts
+						else if (totalRepass-- > 0)
+						{
+							needRepass = true;
+						}
+					}
+					// We need to pay more, so we need to repass
+					if (additionalFee > Money.Zero)
+					{
+						needRepass = true;
+					}
 				}
 			}
 
-			_built = true;
+			// The transaction is too big and would never be accepted by policy rules.
+			// We try to repass by removing small value inputs.
+			if (estimatedSize > MAX_TX_VSIZE)
+			{
+				needRepass = true;
+				var bytesPerInput = (double)estimatedSize / (double)ctx.Transaction.Inputs.Count;
+				var maxInputCount = (int)((double)MAX_TX_VSIZE / bytesPerInput);
+				var inputsToDelete = ctx.Transaction.Inputs.Count - maxInputCount;
+				var minValue = ctx.Selection.OfType<Coin>()
+										.OrderBy(c => c.Amount)
+										.Skip(inputsToDelete - 1)
+										.Select(c => c.Amount + Money.Satoshis(1))
+										.First();
+				ctx.SmallInputsExcluded = true;
+				foreach (var group in _BuilderGroups)
+				{
+					ctx.SetGroup(group);
+					// We need to recalculate the SizeFee
+					ctx.CurrentGroupContext.SizeFee = Money.Zero;
+					ctx.CurrentGroupContext.MinValue = minValue;
+				}
+			}
+
+			if (needRepass)
+			{
+				var newCtx = new TransactionBuildingContext(this);
+				newCtx.SmallInputsExcluded = ctx.SmallInputsExcluded;
+				foreach (var group in _BuilderGroups)
+				{
+					newCtx.SetGroup(group);
+					ctx.SetGroup(group);
+					newCtx.CurrentGroupContext.SizeFee = ctx.CurrentGroupContext.SizeFee;
+					newCtx.CurrentGroupContext.MinValue = ctx.CurrentGroupContext.MinValue;
+				}
+				ctx = newCtx;
+				goto retry;
+			}
+
+
+			if (sign)
+			{
+				SignTransactionInPlace(ctx.Transaction);
+			}
+
 			if (ctx.Transaction.Outputs.Count == 0)
 				throw new NotEnoughFundsException("Not enough funds to create even one change output", null, GetDust());
 			return ctx.Transaction;
@@ -1469,162 +1869,221 @@ namespace NBitcoin
 			return c.Amount >= FilterUneconomicalCoinsRate.GetFee(vSize);
 		}
 
-		private IEnumerable<ICoin> BuildTransaction<TMoney>(
+		private ICoin[] BuildTransaction(
 			TransactionBuildingContext ctx,
 			BuilderGroup group,
-			List<Func<TransactionBuilder.TransactionBuildingContext, TMoney?>> builders,
-			IEnumerable<ICoin> coins,
-			TMoney zero) where TMoney : class, IMoney
+			List<Action<TransactionBuilder.TransactionBuildingContext>> builders,
+			IEnumerable<ICoin> coins)
 		{
-			ICoin[]? selection = null;
-		retry:
-			var hasColoredCoins = _BuilderGroups.Any(g => g.BuildersByAsset.Count != 0 || g.IssuanceBuilders.Count != 0);
-			var originalCtx = ctx.CreateMemento();
-			var target = builders.Select(b => b(ctx)).Sum(zero);
-			if (ctx.CoverOnly != null)
-			{
-				target = ctx.CoverOnly.Add(ctx.ChangeAmount);
-			}
+			var gctx = ctx.CurrentGroupContext;
+			IMoney zero = ctx.Zero;
+			IMoney surrendedMoney = zero is Money ? group.SurrendedValue : zero;
+			foreach (var builder in builders)
+				builder(ctx);
 
-			var unconsumed = coins.Where(c => ctx.ConsumedCoins.All(cc => cc.Outpoint != c.Outpoint)).ToArray();
+			IMoney selectionTarget = (gctx.SentOutput + gctx.Fee - gctx.LeftOverChange + surrendedMoney).GetAmount(zero);
+
+			var unconsumed = coins.Where(c => !ctx.ConsumedOutpoints.Contains(c.Outpoint)).ToArray();
+
+			var selection =
+				group.sendAllToChange ? unconsumed :
+				selectionTarget.CompareTo(zero) <= 0 ? new ICoin[0] :
+				CoinSelector.Select(unconsumed, selectionTarget)?.ToArray();
+
+			var notEnoughFundsMessage =
+				ctx.SmallInputsExcluded ? "You may have enough funds to cover the target, but the transaction's size would be too high."
+										: "Not enough funds to cover the target";
 			if (selection == null)
-			{
-				if (group.sendAllToChange)
-				{
-					selection = unconsumed;
-				}
-				else
-				{
-					selection = CoinSelector.Select(unconsumed, target)?.ToArray();
-				}
-			}
-			if (selection == null)
-				throw new NotEnoughFundsException("Not enough funds to cover the target",
-					group.Name,
-					target.Sub(unconsumed.Select(u => u.Amount).Sum(zero))
-					);
-			var selectedAmount = selection.Select(s => s.Amount).Sum(zero);
-			var change = selectedAmount.Sub(target);
+				throw new NotEnoughFundsException(notEnoughFundsMessage,
+						group.Name,
+						selectionTarget.Sub(unconsumed.Select(u => u.Amount).Sum(zero)));
+
+			var totalInput = selection.Select(s => s.Amount).Sum(zero);
+			var change = totalInput.Sub(selectionTarget).Add(surrendedMoney);
 			if (change.CompareTo(zero) == -1)
-				throw new NotEnoughFundsException("Not enough funds to cover the target",
+				throw new NotEnoughFundsException(notEnoughFundsMessage,
 					group.Name,
 					change.Negate()
 				);
-			if (change.CompareTo(ctx.Dust) == 1)
+
+
+			if (change.CompareTo(zero) > 0)
 			{
 				var changeScript = group.ChangeScript[(int)ctx.ChangeType];
-				if (changeScript == null)
+				if (changeScript is null)
 					throw new InvalidOperationException("A change address should be specified (" + ctx.ChangeType + ")");
-				if (!(ctx.Dust is Money) || change.CompareTo(GetDust(changeScript)) == 1)
+				var dust = ctx.GetDust == null ? null : ctx.GetDust(changeScript);
+				if (!DustPrevention || dust == null || change.CompareTo(dust) >= 0)
 				{
-					ctx.RestoreMemento(originalCtx);
-					ctx.ChangeAmount = change;
-					goto retry;
+					var changeTxout = ctx.AddChangeTxOut(change, ctx);
+					if (zero is Money)
+						ctx.CurrentGroupContext.FeeTxOut ??= changeTxout;
+					ctx.CurrentGroupContext.SentOutput += change;
+				}
+				else if (change.CompareTo(dust) > 0)
+				{
+					gctx.DustPreventionTotalRemoved += change;
 				}
 			}
-			ctx.ChangeAmount = zero;
-			if (ShuffleRandom != null)
-			{
-				Utils.Shuffle(selection, ShuffleRandom);
-			}
+			var inputsPerOutpoints = ctx.Transaction.Inputs.ToDictionary(o => o.PrevOut);
 			foreach (var coin in selection)
 			{
-				ctx.ConsumedCoins.Add(coin);
-				var input = ctx.Transaction.Inputs.FirstOrDefault(i => i.PrevOut == coin.Outpoint);
-				if (input == null)
+				ctx.ConsumedOutpoints.Add(coin.Outpoint);
+				if (!inputsPerOutpoints.TryGetValue(coin.Outpoint, out var input))
+				{
 					input = ctx.Transaction.Inputs.Add(coin.Outpoint);
-
-				if (OptInRBF)
+					inputsPerOutpoints.Add(coin.Outpoint, input);
+				}
+				var options = group.GetOptions(coin);
+				if (options?.Sequence is Sequence seq)
+				{
+					input.Sequence = seq;
+				}
+				else if (OptInRBF)
 				{
 					input.Sequence = Sequence.OptInRBF;
-					ctx.NonFinalSequenceSet = true;
 				}
-				if (_LockTime != null && !ctx.NonFinalSequenceSet)
+				else if (_LockTime != LockTime.Zero)
 				{
-					input.Sequence = 0;
-					ctx.NonFinalSequenceSet = true;
+					input.Sequence = Sequence.FeeSnipping;
 				}
 			}
-			if (MergeOutputs && !hasColoredCoins)
-			{
-				var collapsedOutputs = ctx.Transaction.Outputs
-							   .GroupBy(o => o.ScriptPubKey)
-							   .Select(o => o.Count() == 1 ? o.First() : ctx.Transaction.Outputs.CreateNewTxOut(o.Select(txout => txout.Value).Sum(), o.Key))
-							   .ToArray();
-				if (collapsedOutputs.Length < ctx.Transaction.Outputs.Count)
-				{
-					ctx.Transaction.Outputs.Clear();
-					ctx.Transaction.Outputs.AddRange(collapsedOutputs);
-				}
-			}
-			AfterBuild(ctx.Transaction);
+			gctx.Selection.AddRange(selection);
 			return selection;
-		}
-
-		private void ModifyBuildersForSubstractFees(TransactionBuildingContext ctx, BuilderGroup group, List<Builder> builders)
-		{
-			for (int i = 0; i < builders.Count; i++)
-			{
-				if (builders[i].Target == _SubstractFeeBuilder)
-				{
-					builders.Remove(builders[i]);
-					var newTxOut = _SubstractFeeBuilder._TxOut.Clone();
-					var minimumTxOutValue = (DustPrevention ? GetDust(newTxOut.ScriptPubKey) : Money.Zero);
-					newTxOut.Value -= _TotalFee + ctx.AdditionalFees;
-					if (newTxOut.Value < Money.Zero)
-					{
-						throw new NotEnoughFundsException("Can't substract fee from this output because the amount is too small",
-						group.Name,
-						-newTxOut.Value
-						);
-					}
-					if (newTxOut.Value >= minimumTxOutValue)
-						builders.Insert(i, new SendBuilder(newTxOut).Build);
-					else
-					{
-						ctx.AdditionalFees += newTxOut.Value;
-					}
-					break;
-				}
-			}
 		}
 
 		protected virtual void AfterBuild(Transaction transaction)
 		{
 		}
 
-		public Transaction SignTransaction(Transaction transaction, SigHash sigHash)
+		public Transaction SignTransaction(Transaction transaction)
 		{
 			var tx = transaction.Clone();
-			SignTransactionInPlace(tx, sigHash);
+			SignTransactionInPlace(tx);
 			return tx;
 		}
 
-		public Transaction SignTransaction(Transaction transaction)
-		{
-			return SignTransaction(transaction, SigHash.All);
-		}
+		/// <summary>
+		/// Sign the transaction passed as parameter
+		/// </summary>
+		/// <param name="transaction">The transaction</param>
+		/// <returns>The transaction object as the one passed as parameter</returns>
 		public Transaction SignTransactionInPlace(Transaction transaction)
 		{
-			return SignTransactionInPlace(transaction, SigHash.All);
+			var ctx = new TransactionSigningContext(this, transaction, signingOptions);
+			ExtractExistingSignatures(ctx);
+			SignTransactionContext(ctx);
+			FinalizeTransactionContext(ctx);
+			MergePartialSignatures(ctx);
+			SetFinalScripts(ctx, transaction);
+			return transaction;
 		}
-		public Transaction SignTransactionInPlace(Transaction transaction, SigHash sigHash)
+
+		private static void SetFinalScripts(TransactionSigningContext ctx, Transaction transaction)
 		{
-			return SignTransactionInPlace(new TransactionSigningContext(this, transaction, sigHash));
-		}
-		Transaction SignTransactionInPlace(TransactionSigningContext ctx)
-		{
-			foreach (var input in ctx.Transaction.Inputs.AsIndexedInputs())
+			foreach (var input in ctx.PSBT.Inputs)
 			{
-				if (ctx.InputIndex is uint i && i != input.Index)
-					continue;
-				var coin = FindSignableCoin(input);
-				if (coin != null)
+				if (input.IsFinalized())
 				{
-					Sign(ctx, coin, input);
+					var txin = transaction.Inputs[input.Index];
+					txin.ScriptSig = input.FinalScriptSig ?? Script.Empty;
+					txin.WitScript = input.FinalScriptWitness ?? WitScript.Empty;
 				}
 			}
-			return ctx.Transaction;
+		}
+
+		/// <summary>
+		/// Estimate the fee rate of the transaction once it is fully signed.
+		/// </summary>
+		/// <param name="tx">The transaction to be signed</param>
+		/// <returns>The fee rate, or null if the transaction builder is missing previous coins</returns>
+		/// <exception cref="CoinNotFoundException">If the transaction builder is missing some coins</exception>
+		public FeeRate EstimateFeeRate(Transaction tx)
+		{
+			if (tx == null)
+				throw new ArgumentNullException(nameof(tx));
+			var vSize = this.EstimateSize(tx, true);
+			var fee = tx.GetFee(this.FindSpentCoins(tx));
+			return new FeeRate(fee, vSize);
+		}
+
+		void ExtractExistingSignatures(TransactionSigningContext ctx)
+		{
+			foreach (var inputCtx in ctx.GetInputSigningContexts())
+			{
+				inputCtx.Extension.ExtractExistingSignatures(inputCtx);
+			}
+		}
+
+		void SignTransactionContext(TransactionSigningContext ctx)
+		{
+
+			foreach (var inputCtx in ctx.GetInputSigningContexts())
+			{
+				if (inputCtx.Coin.TxOut.ScriptPubKey.IsScriptType(ScriptType.Taproot)
+					&& !(ctx.SigningOptions.PrecomputedTransactionData is TaprootReadyPrecomputedTransactionData))
+				{
+					throw new InvalidOperationException($"Impossible to sign taproot input {inputCtx.Input.Index}.\n" +
+						$"Either use TransactionBuilder.AddCoins and add all the coins spent by the transaction to sign, or set SigningOptions.PrecomputedTransactionData via TransactionBuilder.SetSigningOptions to an instance of type TaprootReadyPrecomputedTransactionData.");
+				}
+				var signer = new CompositeSigner(GetSigners(inputCtx).ToArray());
+				var keyrepo = new CompositeKeyRepository(GetKeyRepositories(inputCtx).ToArray());
+				inputCtx.Extension.Sign(inputCtx, keyrepo, signer);
+			}
+		}
+
+		private void MergePartialSignatures(TransactionSigningContext ctx)
+		{
+			foreach (var inputCtx in ctx.GetInputSigningContexts())
+			{
+				if (inputCtx.Input.IsFinalized())
+					continue;
+				inputCtx.Extension.MergePartialSignatures(inputCtx);
+			}
+		}
+
+		void FinalizeTransactionContext(TransactionSigningContext ctx)
+		{
+			foreach (var inputCtx in ctx.GetInputSigningContexts())
+			{
+				if (inputCtx.Input.IsFinalized())
+					continue;
+				inputCtx.Extension.Finalize(inputCtx);
+				if (!inputCtx.Input.IsFinalized())
+					continue;
+				var txIn = inputCtx.Input;
+				ScriptCoin? scriptCoin = inputCtx.Coin as ScriptCoin;
+				if (!inputCtx.Coin.IsMalleable && WitScript.IsNullOrEmpty(txIn.FinalScriptWitness))
+				{
+					txIn.FinalScriptWitness = txIn.FinalScriptSig;
+					txIn.FinalScriptSig = Script.Empty;
+					if (scriptCoin != null)
+					{
+						if (scriptCoin.IsP2SH)
+							txIn.FinalScriptSig = new Script(Op.GetPushOp(scriptCoin.GetP2SHRedeem().ToBytes(true)));
+						if (scriptCoin.RedeemType == RedeemType.WitnessV0)
+							txIn.FinalScriptWitness = txIn.FinalScriptWitness + new WitScript(Op.GetPushOp(scriptCoin.Redeem.ToBytes(true)));
+					}
+				}
+				else
+				{
+					if (scriptCoin != null && scriptCoin.RedeemType == RedeemType.P2SH)
+					{
+						txIn.FinalScriptSig = txIn.FinalScriptSig + Op.GetPushOp(scriptCoin.GetP2SHRedeem().ToBytes(true));
+					}
+				}
+			}
+		}
+
+		IEnumerable<ISigner> GetSigners(InputSigningContext inputCtx)
+		{
+			yield return new TransactionBuilderSigner(inputCtx);
+			yield return new KnownSignatureSigner(inputCtx, _KnownSignatures);
+		}
+		IEnumerable<IKeyRepository> GetKeyRepositories(InputSigningContext inputCtx)
+		{
+			yield return new TransactionBuilderKeyRepository(inputCtx);
+			yield return new KnownSignatureSigner(inputCtx, _KnownSignatures);
 		}
 		public ICoin? FindSignableCoin(IndexedTxIn txIn)
 		{
@@ -1636,7 +2095,7 @@ namespace NBitcoin
 			var coin = FindCoin(txIn.PrevOut);
 			if (coin is IColoredCoin)
 				coin = ((IColoredCoin)coin).Bearer;
-			if (coin == null || coin is ScriptCoin || coin is StealthCoin)
+			if (coin == null || coin is ScriptCoin)
 				return coin;
 
 			var hash = ScriptCoin.GetRedeemHash(coin.TxOut.ScriptPubKey);
@@ -1669,6 +2128,20 @@ namespace NBitcoin
 			return coin;
 		}
 
+		TxOut[] GetSpentOutputs(Transaction tx)
+		{
+			TxOut[] outputs = new TxOut[tx.Inputs.Count];
+			foreach (var input in tx.Inputs.AsIndexedInputs())
+			{
+				var c = FindCoin(input.PrevOut);
+				if (c is ICoin)
+					outputs[input.Index] = c.TxOut;
+				else
+					throw new CoinNotFoundException(input);
+			}
+			return outputs;
+		}
+
 		/// <summary>
 		/// Verify that a transaction is fully signed and have enough fees
 		/// </summary>
@@ -1682,6 +2155,16 @@ namespace NBitcoin
 		/// <summary>
 		/// Verify that a transaction is fully signed and have enough fees
 		/// </summary>
+		/// <param name="validator">The transaction validator</param>
+		/// <returns>True if no error</returns>
+		public bool Verify(TransactionValidator validator)
+		{
+			TransactionPolicyError[] errors;
+			return Verify(validator, null as Money, out errors);
+		}
+		/// <summary>
+		/// Verify that a transaction is fully signed and have enough fees
+		/// </summary>
 		/// <param name="tx">The transaction to check</param>
 		/// <param name="expectedFees">The expected fees (more or less 10%)</param>
 		/// <returns>True if no error</returns>
@@ -1689,6 +2172,17 @@ namespace NBitcoin
 		{
 			TransactionPolicyError[] errors;
 			return Verify(tx, expectedFees, out errors);
+		}
+		/// <summary>
+		/// Verify that a transaction is fully signed and have enough fees
+		/// </summary>
+		/// <param name="validator">The transaction validator</param>
+		/// <param name="expectedFees">The expected fees (more or less 10%)</param>
+		/// <returns>True if no error</returns>
+		public bool Verify(TransactionValidator validator, Money expectedFees)
+		{
+			TransactionPolicyError[] errors;
+			return Verify(validator, expectedFees, out errors);
 		}
 
 		/// <summary>
@@ -1702,6 +2196,17 @@ namespace NBitcoin
 			TransactionPolicyError[] errors;
 			return Verify(tx, expectedFeeRate, out errors);
 		}
+		/// <summary>
+		/// Verify that a transaction is fully signed and have enough fees
+		/// </summary>
+		/// <param name="validator">The transaction validator</param>
+		/// <param name="expectedFeeRate">The expected fee rate</param>
+		/// <returns>True if no error</returns>
+		public bool Verify(TransactionValidator validator, FeeRate expectedFeeRate)
+		{
+			TransactionPolicyError[] errors;
+			return Verify(validator, expectedFeeRate, out errors);
+		}
 
 		/// <summary>
 		/// Verify that a transaction is fully signed and have enough fees
@@ -1714,6 +2219,27 @@ namespace NBitcoin
 			return Verify(tx, null as Money, out errors);
 		}
 		/// <summary>
+		/// Verify that a transaction is fully signed and have enough fees
+		/// </summary>
+		/// <param name="validator">The transaction validator</param>
+		/// <param name="errors">Detected errors</param>
+		/// <returns>True if no error</returns>
+		public bool Verify(TransactionValidator validator, out TransactionPolicyError[] errors)
+		{
+			return Verify(validator, null as Money, out errors);
+		}
+
+		public TransactionValidator CreateTransactionValidatorFromCoins(Transaction tx)
+		{
+			if (tx == null)
+				throw new ArgumentNullException(nameof(tx));
+			var validator = tx.CreateValidator(GetSpentOutputs(tx));
+			if (StandardTransactionPolicy.ScriptVerify is ScriptVerify s)
+				validator.ScriptVerify = s;
+			return validator;
+		}
+
+		/// <summary>
 		/// Verify that a transaction is fully signed, have enough fees, and follow the Standard and Miner Transaction Policy rules
 		/// </summary>
 		/// <param name="tx">The transaction to check</param>
@@ -1724,20 +2250,31 @@ namespace NBitcoin
 		{
 			if (tx == null)
 				throw new ArgumentNullException(nameof(tx));
-			var coins = tx.Inputs.Select(i => FindCoin(i.PrevOut)).Where(c => c != null).ToArray();
+			return Verify(CreateTransactionValidatorFromCoins(tx), expectedFees, out errors);
+		}
+
+		/// <summary>
+		/// Verify that a transaction is fully signed, have enough fees, and follow the Standard and Miner Transaction Policy rules
+		/// </summary>
+		/// <param name="validator">The transaction validator</param>
+		/// <param name="expectedFees">The expected fees (more or less 10%)</param>
+		/// <param name="errors">Detected errors</param>
+		/// <returns>True if no error</returns>
+		public bool Verify(TransactionValidator validator, Money? expectedFees, out TransactionPolicyError[] errors)
+		{
+			if (validator == null)
+				throw new ArgumentNullException(nameof(validator));
 			List<TransactionPolicyError> exceptions = new List<TransactionPolicyError>();
-			var policyErrors = MinerTransactionPolicy.Instance.Check(tx, coins);
+			var policyErrors = MinerTransactionPolicy.Instance.Check(validator);
 			exceptions.AddRange(policyErrors);
-			policyErrors = StandardTransactionPolicy.Check(tx, coins);
+			policyErrors = StandardTransactionPolicy.Check(validator);
 			exceptions.AddRange(policyErrors);
 			if (expectedFees != null)
 			{
-				var fees = tx.GetFee(coins);
+				var fees = validator.Transaction.GetFee(validator.SpentOutputs);
 				if (fees != null)
 				{
 					Money margin = Money.Zero;
-					if (DustPrevention)
-						margin = GetDust() * 2;
 					if (!fees.Almost(expectedFees, margin))
 						exceptions.Add(new NotEnoughFundsPolicyError("Fees different than expected", expectedFees - fees));
 				}
@@ -1758,6 +2295,20 @@ namespace NBitcoin
 				throw new ArgumentNullException(nameof(tx));
 			return Verify(tx, expectedFeeRate == null ? null : expectedFeeRate.GetFee(tx), out errors);
 		}
+		/// <summary>
+		/// Verify that a transaction is fully signed and have enough fees
+		/// </summary>
+		/// <param name="validator">The transaction validator</param>
+		/// <param name="expectedFeeRate">The expected fee rate</param>
+		/// <param name="errors">Detected errors</param>
+		/// <returns>True if no error</returns>
+		public bool Verify(TransactionValidator validator, FeeRate expectedFeeRate, out TransactionPolicyError[] errors)
+		{
+			if (validator == null)
+				throw new ArgumentNullException(nameof(validator));
+			return Verify(validator, expectedFeeRate == null ? null : expectedFeeRate.GetFee(validator.Transaction), out errors);
+		}
+
 		/// <summary>
 		/// Verify that a transaction is fully signed and have enough fees
 		/// </summary>
@@ -1798,10 +2349,15 @@ namespace NBitcoin
 
 		public ICoin? FindCoin(OutPoint outPoint)
 		{
-			var result = _BuilderGroups.Select(c => c.Coins.TryGet(outPoint)).FirstOrDefault(r => r != null);
+			var result = _BuilderGroups.Select(c => c.CoinsWithOptions.TryGet(outPoint)).FirstOrDefault(r => r != null)?.Coin;
 			if (result == null && CoinFinder != null)
 				result = CoinFinder(outPoint);
 			return result;
+		}
+
+		internal CoinOptions? FindCoinOptions(OutPoint outPoint)
+		{
+			return _BuilderGroups.Select(c => c.CoinsWithOptions.TryGet(outPoint)).FirstOrDefault(r => r != null)?.Options;
 		}
 
 		/// <summary>
@@ -1851,6 +2407,13 @@ namespace NBitcoin
 			return witSize + baseSize;
 		}
 
+		/// <summary>
+		/// Estimate the witness size and the base size of a transaction
+		/// </summary>
+		/// <param name="tx">The transaction</param>
+		/// <param name="witSize">The witness size</param>
+		/// <param name="baseSize">The base size</param>
+		/// <exception cref="CoinNotFoundException">If the transaction builder is missing some coins</exception>
 		public void EstimateSizes(Transaction tx, out int witSize, out int baseSize)
 		{
 			if (tx == null)
@@ -1868,7 +2431,7 @@ namespace NBitcoin
 				var coin = FindSignableCoin(txin) ?? FindCoin(txin.PrevOut);
 				if (coin == null)
 					throw CoinNotFound(txin);
-				if (coin.GetHashVersion() == HashVersion.Witness)
+				if (!coin.IsMalleable)
 					hasWitness = true;
 				else
 					nonWitnessCount++;
@@ -1902,9 +2465,8 @@ namespace NBitcoin
 
 			int p2shPushRedeemSize = 0;
 			int segwitPushRedeemSize = 0;
-			if (coin is ScriptCoin)
+			if (coin is ScriptCoin scriptCoin)
 			{
-				var scriptCoin = (ScriptCoin)coin;
 				var p2sh = scriptCoin.GetP2SHRedeem();
 				if (p2sh != null)
 				{
@@ -1924,20 +2486,19 @@ namespace NBitcoin
 				}
 			}
 
-			var scriptPubkey = coin.GetScriptCode();
 			var scriptSigSize = -1;
 			foreach (var extension in Extensions)
 			{
-				if (extension.CanEstimateScriptSigSize(scriptPubkey))
+				if (extension.CanEstimateScriptSigSize(coin))
 				{
-					scriptSigSize = extension.EstimateScriptSigSize(scriptPubkey);
+					scriptSigSize = extension.EstimateScriptSigSize(coin);
 					break;
 				}
 			}
 
 			if (scriptSigSize == -1)
 				scriptSigSize += coin.TxOut.ScriptPubKey.Length; //Using heurestic to approximate size of unknown scriptPubKey
-			if (coin.GetHashVersion() == HashVersion.Witness)
+			if (!coin.IsMalleable)
 			{
 				baseSize += new Protocol.VarInt((ulong)p2shPushRedeemSize).GetSerializedSize();
 				witSize += scriptSigSize + new Protocol.VarInt((ulong)(scriptSigSize + segwitPushRedeemSize)).GetSerializedSize();
@@ -1956,7 +2517,6 @@ namespace NBitcoin
 			if (feeRate == null)
 				throw new ArgumentNullException(nameof(feeRate));
 
-			List<Builder> feeBuilders = new List<Builder>();
 			Money feeSent = Money.Zero;
 			try
 			{
@@ -1968,17 +2528,12 @@ namespace NBitcoin
 					if (delta <= Money.Zero)
 						break;
 					SendFees(delta);
-					feeBuilders.Add(CurrentGroup.Builders[CurrentGroup.Builders.Count - 1]);
 					feeSent += delta;
 				}
 			}
 			finally
 			{
-				foreach (var feeBuilder in feeBuilders)
-				{
-					CurrentGroup.Builders.Remove(feeBuilder);
-				}
-				_TotalFee -= feeSent;
+				CurrentGroup.FixedFee -= feeSent;
 			}
 			return feeSent;
 		}
@@ -2000,137 +2555,35 @@ namespace NBitcoin
 			return feeRate.GetFee(estimation);
 		}
 
-		private void Sign(TransactionSigningContext ctx, ICoin coin, IndexedTxIn txIn)
+		private static void AdjustFinalScripts(ICoin coin, PSBTInput txIn)
 		{
-			var input = txIn.TxIn;
-			if (coin is StealthCoin stealthCoin)
+			if (txIn.FinalScriptSig is Script)
 			{
-				var scanKey = ctx.FindKey(stealthCoin.Address.ScanPubKey.ScriptPubKey);
-				if (scanKey == null)
-					throw new KeyNotFoundException("Scan key for decrypting StealthCoin not found");
-				var spendKeys = stealthCoin.Address.SpendPubKeys.Select(p => ctx.FindKey(p.ScriptPubKey)).Where(p => p != null).ToArray();
-				ctx.AdditionalKeys.AddRange(stealthCoin.Uncover(spendKeys, scanKey));
-				var normalCoin = new Coin(coin.Outpoint, coin.TxOut);
-				if (stealthCoin.Redeem != null)
-					normalCoin = normalCoin.ToScriptCoin(stealthCoin.Redeem);
-				coin = normalCoin;
-			}
-			var scriptSig = CreateScriptSig(ctx, coin, txIn);
-			if (scriptSig == null)
-				return;
-			ScriptCoin? scriptCoin = coin as ScriptCoin;
-
-			Script? signatures = null;
-			if (coin.GetHashVersion() == HashVersion.Witness)
-			{
-				signatures = txIn.WitScript;
-				if (scriptCoin != null)
+				ScriptCoin? scriptCoin = coin as ScriptCoin;
+				if (!coin.IsMalleable)
 				{
-					if (scriptCoin.IsP2SH)
-						txIn.ScriptSig = Script.Empty;
-					if (scriptCoin.RedeemType == RedeemType.WitnessV0)
-						signatures = RemoveRedeem(signatures);
-				}
-			}
-			else
-			{
-				signatures = txIn.ScriptSig;
-				if (scriptCoin != null && scriptCoin.RedeemType == RedeemType.P2SH)
-					signatures = RemoveRedeem(signatures);
-			}
-
-
-			signatures = CombineScriptSigs(coin, scriptSig, signatures);
-
-			if (coin.GetHashVersion() == HashVersion.Witness)
-			{
-				txIn.WitScript = signatures;
-				if (scriptCoin != null)
-				{
-					if (scriptCoin.IsP2SH)
-						txIn.ScriptSig = new Script(Op.GetPushOp(scriptCoin.GetP2SHRedeem().ToBytes(true)));
-					if (scriptCoin.RedeemType == RedeemType.WitnessV0)
-						txIn.WitScript = txIn.WitScript + new WitScript(Op.GetPushOp(scriptCoin.Redeem.ToBytes(true)));
-				}
-			}
-			else
-			{
-				txIn.ScriptSig = signatures;
-				if (scriptCoin != null && scriptCoin.RedeemType == RedeemType.P2SH)
-				{
-					txIn.ScriptSig = input.ScriptSig + Op.GetPushOp(scriptCoin.GetP2SHRedeem().ToBytes(true));
-				}
-			}
-		}
-
-
-		private static Script RemoveRedeem(Script script)
-		{
-			if (script == Script.Empty)
-				return script;
-			var ops = script.ToOps().ToArray();
-			return new Script(ops.Take(ops.Length - 1));
-		}
-
-		private Script CombineScriptSigs(ICoin coin, Script a, Script b)
-		{
-			var scriptPubkey = coin.GetScriptCode();
-			if (Script.IsNullOrEmpty(a))
-				return b ?? Script.Empty;
-			if (Script.IsNullOrEmpty(b))
-				return a ?? Script.Empty;
-
-			foreach (var extension in Extensions)
-			{
-				if (extension.CanCombineScriptSig(scriptPubkey, a, b))
-				{
-					return extension.CombineScriptSig(scriptPubkey, a, b);
-				}
-			}
-			return a.Length > b.Length ? a : b; //Heurestic
-		}
-
-		private Script? CreateScriptSig(TransactionSigningContext ctx, ICoin coin, IndexedTxIn txIn)
-		{
-			var scriptPubKey = coin.GetScriptCode();
-			var keyRepo = new TransactionBuilderKeyRepository(ctx);
-			var signer = new TransactionBuilderSigner(ctx, coin, ctx.SigHash, txIn);
-
-			var signer2 = new KnownSignatureSigner(ctx, _KnownSignatures, coin, txIn);
-
-			foreach (var extension in Extensions)
-			{
-				if (extension.CanGenerateScriptSig(scriptPubKey))
-				{
-					var scriptSig1 = extension.GenerateScriptSig(scriptPubKey, keyRepo, signer);
-					var scriptSig2 = extension.GenerateScriptSig(scriptPubKey, signer2, signer2);
-					if (scriptSig1 != null && scriptSig2 != null && extension.CanCombineScriptSig(scriptPubKey, scriptSig1, scriptSig2))
+					txIn.FinalScriptWitness = txIn.FinalScriptSig;
+					txIn.FinalScriptSig = null;
+					if (scriptCoin != null)
 					{
-						var combined = extension.CombineScriptSig(scriptPubKey, scriptSig1, scriptSig2);
-						if (combined != null)
-						{
-							ctx.SignatureEvents.AddRange(signer.EmittedSignatures);
-							ctx.SignatureEvents.AddRange(signer2.EmittedSignatures);
-						}
-						return combined;
+						if (scriptCoin.IsP2SH)
+							txIn.FinalScriptSig = new Script(Op.GetPushOp(scriptCoin.GetP2SHRedeem().ToBytes(true)));
+						if (scriptCoin.RedeemType == RedeemType.WitnessV0)
+							txIn.FinalScriptWitness = txIn.FinalScriptWitness + new WitScript(Op.GetPushOp(scriptCoin.Redeem.ToBytes(true)));
 					}
-					if (scriptSig1 != null)
+				}
+				else
+				{
+					if (scriptCoin != null && scriptCoin.RedeemType == RedeemType.P2SH)
 					{
-						ctx.SignatureEvents.AddRange(signer.EmittedSignatures);
+						txIn.FinalScriptSig = txIn.FinalScriptSig + Op.GetPushOp(scriptCoin.GetP2SHRedeem().ToBytes(true));
 					}
-					if (scriptSig2 != null)
-					{
-						ctx.SignatureEvents.AddRange(signer2.EmittedSignatures);
-					}
-					return scriptSig1 ?? scriptSig2;
 				}
 			}
-
-			throw new NotSupportedException("Unsupported scriptPubKey");
 		}
 
-		List<Tuple<PubKey, ECDSASignature, OutPoint>> _KnownSignatures = new List<Tuple<PubKey, ECDSASignature, OutPoint>>();
-		internal bool IsCompatibleKeyFromScriptCode(PubKey pubKey, Script scriptPubKey)
+		List<Tuple<IPubKey, ITransactionSignature, OutPoint>> _KnownSignatures = new List<Tuple<IPubKey, ITransactionSignature, OutPoint>>();
+		internal bool IsCompatibleKeyFromScriptCode(IPubKey pubKey, Script scriptPubKey)
 		{
 			return _Extensions.Any(e => e.IsCompatibleKey(pubKey, scriptPubKey));
 		}
@@ -2142,6 +2595,7 @@ namespace NBitcoin
 		public TransactionBuilder Then()
 		{
 			_CurrentGroup = null;
+			_LastSendBuilder = null;
 			return this;
 		}
 
@@ -2162,67 +2616,6 @@ namespace NBitcoin
 			return this;
 		}
 
-		/// <summary>
-		/// Specify the amount of money to cover txouts, if not specified all txout will be covered
-		/// </summary>
-		/// <param name="amount"></param>
-		/// <returns></returns>
-		public TransactionBuilder CoverOnly(Money amount)
-		{
-			CurrentGroup.CoverOnly = amount;
-			return this;
-		}
-
-
-		Transaction? _CompletedTransaction;
-		private bool _built = false;
-
-		/// <summary>
-		/// Allows to keep building on the top of a partially built transaction
-		/// </summary>
-		/// <param name="transaction">Transaction to complete</param>
-		/// <returns></returns>
-		public TransactionBuilder ContinueToBuild(Transaction transaction)
-		{
-			if (_built)
-				throw new InvalidOperationException("ContinueToBuild must be called with a new TransactionBuilder instance");
-			if (_CompletedTransaction != null)
-				throw new InvalidOperationException("Transaction to complete already set");
-			_CompletedTransaction = transaction.Clone();
-			return this;
-		}
-
-		/// <summary>
-		/// Will cover the remaining amount of TxOut of a partially built transaction (to call after ContinueToBuild)
-		/// </summary>
-		/// <returns></returns>
-		public TransactionBuilder CoverTheRest()
-		{
-			if (_CompletedTransaction == null)
-				throw new InvalidOperationException("A partially built transaction should be specified by calling ContinueToBuild");
-
-			var spent = _CompletedTransaction.Inputs.AsIndexedInputs().Select(txin =>
-			{
-				var c = FindCoin(txin.PrevOut);
-				if (c == null)
-					throw CoinNotFound(txin);
-				if (!(c is Coin))
-					return null;
-				return (Coin)c;
-			})
-					.Select(c => c == null ? Money.Zero : c.Amount)
-					.Sum();
-
-			var toComplete = _CompletedTransaction.TotalOut - spent;
-			CurrentGroup.Builders.Add(ctx =>
-			{
-				if (toComplete < Money.Zero)
-					return Money.Zero;
-				return toComplete;
-			});
-			return this;
-		}
-
 		public TransactionBuilder AddCoins(Transaction transaction)
 		{
 			var txId = transaction.GetHash();
@@ -2231,6 +2624,8 @@ namespace NBitcoin
 		}
 
 		Dictionary<Script, Script> _ScriptPubKeyToRedeem = new Dictionary<Script, Script>();
+		private SigningOptions signingOptions = new SigningOptions();
+
 		public TransactionBuilder AddKnownRedeems(params Script[] knownRedeems)
 		{
 			foreach (var redeem in knownRedeems)
@@ -2242,6 +2637,7 @@ namespace NBitcoin
 			return this;
 		}
 
+		[Obsolete("Use PSBTs rather than raw transactions to combine signatures.")]
 		public Transaction? CombineSignatures(params Transaction[] transactions)
 		{
 			if (transactions.Length == 1)
@@ -2249,59 +2645,51 @@ namespace NBitcoin
 			if (transactions.Length == 0)
 				return null;
 
-			Transaction tx = transactions[0].Clone();
-			for (int i = 1; i < transactions.Length; i++)
+			PSBT[] psbts = new PSBT[transactions.Length];
+
+			for (int i = 0; i < psbts.Length; i++)
 			{
-				var signed = transactions[i];
-				tx = CombineSignaturesCore(tx, signed);
+				var ctx = new TransactionSigningContext(this, transactions[i], signingOptions);
+				ExtractExistingSignatures(ctx);
+				psbts[i] = ctx.PSBT;
+			}
+			var psbt = psbts[0];
+			for (int i = 1; i < psbts.Length; i++)
+			{
+				psbt = psbt.Combine(psbts[i]);
+			}
+			var ctx2 = new TransactionSigningContext(this, psbt, psbt.GetOriginalTransaction(), signingOptions);
+			FinalizeTransactionContext(ctx2);
+			MergePartialSignatures(ctx2);
+			var tx = ctx2.Transaction!;
+			SetFinalScripts(ctx2, tx);
+			for (int i = 0; i < tx.Inputs.Count; i++)
+			{
+				var txin = tx.Inputs[i];
+				if (txin.ScriptSig == Script.Empty)
+				{
+					txin.ScriptSig = transactions
+										.Select(tx => tx.Inputs[i].ScriptSig).FirstOrDefault(s => !Script.IsNullOrEmpty(s))
+										?? Script.Empty;
+				}
+				if (txin.WitScript == WitScript.Empty)
+				{
+					txin.WitScript = transactions
+									.Select(tx => tx.Inputs[i].WitScript).FirstOrDefault(s => !WitScript.IsNullOrEmpty(s))
+										?? WitScript.Empty;
+				}
 			}
 			return tx;
 		}
-
-
 		private readonly List<BuilderExtension> _Extensions = new List<BuilderExtension>();
+		private const int MAX_TX_VSIZE = 100_000;
+
 		public List<BuilderExtension> Extensions
 		{
 			get
 			{
 				return _Extensions;
 			}
-		}
-
-		private Transaction CombineSignaturesCore(Transaction signed1, Transaction signed2)
-		{
-			if (signed1 == null)
-				return signed2;
-			if (signed2 == null)
-				return signed1;
-			var tx = signed1.Clone();
-			for (int i = 0; i < tx.Inputs.Count; i++)
-			{
-				if (i >= signed2.Inputs.Count)
-					break;
-
-				var txIn = tx.Inputs[i];
-
-				var coin = FindCoin(txIn.PrevOut);
-				var scriptPubKey = coin == null
-					? (DeduceScriptPubKey(txIn.ScriptSig) ?? DeduceScriptPubKey(signed2.Inputs[i].ScriptSig))
-					: coin.TxOut.ScriptPubKey;
-
-				var txout = coin?.TxOut;
-				if (txout == null)
-				{
-					txout = signed1.Outputs.CreateNewTxOut(null, scriptPubKey);
-				}
-				var result = Script.CombineSignatures(
-									scriptPubKey,
-									new TransactionChecker(tx, i, txout),
-									 GetScriptSigs(signed1.Inputs.AsIndexedInputs().Skip(i).First()),
-									 GetScriptSigs(signed2.Inputs.AsIndexedInputs().Skip(i).First()));
-				var input = tx.Inputs.AsIndexedInputs().Skip(i).First();
-				input.WitScript = result.WitSig;
-				input.ScriptSig = result.ScriptSig;
-			}
-			return tx;
 		}
 
 		private ScriptSigs GetScriptSigs(IndexedTxIn indexedTxIn)

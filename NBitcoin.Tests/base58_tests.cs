@@ -144,8 +144,6 @@ namespace NBitcoin.Tests
 		{
 			var tests = TestCase.read_json("data/base58_keys_valid.json");
 			tests = tests.Concat(TestCase.read_json("data/base58_keys_valid2.json")).ToArray();
-			Network network = null;
-
 			foreach (var test in tests)
 			{
 				string strTest = test.ToString();
@@ -160,6 +158,7 @@ namespace NBitcoin.Tests
 				bool isPrivkey = (bool)metadata.isPrivkey;
 				bool isTestnet = (bool)metadata.isTestnet;
 
+				Network network;
 				if (isTestnet)
 					network = Network.TestNet;
 				else
@@ -174,7 +173,7 @@ namespace NBitcoin.Tests
 				else
 				{
 					string exp_addrType = (string)metadata.addrType;
-					TxDestination dest;
+					IAddressableDestination dest;
 					if (exp_addrType == "pubkey")
 					{
 						dest = new KeyId(new uint160(exp_payload));
@@ -200,17 +199,10 @@ namespace NBitcoin.Tests
 						Assert.True(false, "Bad addrtype: " + strTest);
 						continue;
 					}
-					try
-					{
-						BitcoinAddress addrOut = dest.GetAddress(network);
-						Assert.True(addrOut.ToString() == exp_base58string, "mismatch: " + strTest);
-						Assert.True(addrOut.ScriptPubKey == dest.ScriptPubKey);
-						Assert.True(dest.ScriptPubKey.GetDestination() == dest);
-					}
-					catch (ArgumentException)
-					{
-						Assert.True(dest.GetType() == typeof(TxDestination));
-					}
+					BitcoinAddress addrOut = dest.GetAddress(network);
+					Assert.True(addrOut.ToString() == exp_base58string, "mismatch: " + strTest);
+					Assert.True(addrOut.ScriptPubKey == dest.ScriptPubKey);
+					Assert.True(dest.ScriptPubKey.GetDestination().Equals(dest));
 				}
 			}
 		}

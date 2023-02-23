@@ -8,6 +8,7 @@ using System.Linq;
 using System.Net.Sockets;
 #endif
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -53,7 +54,7 @@ namespace NBitcoin
 	}
 	public partial class BitcoinStream
 	{
-		int _MaxArraySize = 1024 * 1024;
+		int _MaxArraySize = 1024 * 1024 * 4;
 		public int MaxArraySize
 		{
 			get
@@ -235,51 +236,98 @@ namespace NBitcoin
 
 		public void ReadWrite<T>(ref List<T> list) where T : IBitcoinSerializable
 		{
-			ReadWriteList<List<T>, T>(ref list);
-		}
-
-		public void ReadWrite<TList, TItem>(ref TList list)
-			where TList : List<TItem>, new()
-			where TItem : IBitcoinSerializable, new()
-		{
-			ReadWriteList<TList, TItem>(ref list);
-		}
-
-		private void ReadWriteList<TList, TItem>(ref TList data)
-			where TList : List<TItem>, new()
-			where TItem : IBitcoinSerializable
-		{
-			var dataArray = data == null ? null : data.ToArray();
-			if (Serializing && dataArray == null)
+			int listLen = 0;
+			if (Serializing)
 			{
-				dataArray = new TItem[0];
+				var len = list == null ? 0 : (ulong)list.Count;
+				if (len > (uint)MaxArraySize)
+					throw new ArgumentOutOfRangeException("Array size too big");
+				VarInt.StaticWrite(this, len);
+				if (len == 0)
+					return;
+				listLen = (int)len;
+				foreach (var obj in list)
+				{
+					ReadWrite(obj);
+				}
 			}
-			ReadWriteArray(ref dataArray);
-			if (!Serializing)
+			else
 			{
-				if (data == null)
-					data = new TList();
-				else
-					data.Clear();
-				data.AddRange(dataArray);
+				var len = VarInt.StaticRead(this);
+				if (len > (uint)MaxArraySize)
+					throw new ArgumentOutOfRangeException("Array size too big");
+				listLen = (int)len;
+				list = new List<T>(listLen);
+				for (int i = 0; i < listLen; i++)
+				{
+					T obj = default;
+					ReadWrite(ref obj);
+					list.Add(obj);
+				}
 			}
 		}
-
-		public  void ReadWriteListBytes(ref List<byte[]> data)
+		public void ReadWrite(ref TxInList list)
 		{
-			var dataArray = data?.ToArray();
-			if (Serializing && dataArray == null)
+			int listLen = 0;
+			if (Serializing)
 			{
-				dataArray = new byte[0][];
+				var len = list == null ? 0 : (ulong)list.Count;
+				if (len > (uint)MaxArraySize)
+					throw new ArgumentOutOfRangeException("Array size too big");
+				VarInt.StaticWrite(this, len);
+				if (len == 0)
+					return;
+				listLen = (int)len;
+				foreach (var obj in list)
+				{
+					ReadWrite(obj);
+				}
 			}
-			ReadWriteArray(ref dataArray);
-			if (!Serializing)
+			else
 			{
-				if (data == null)
-					data = new List<byte[]>();
-				else
-					data.Clear();
-				data.AddRange(dataArray);
+				var len = VarInt.StaticRead(this);
+				if (len > (uint)MaxArraySize)
+					throw new ArgumentOutOfRangeException("Array size too big");
+				listLen = (int)len;
+				list = new TxInList(listLen);
+				for (int i = 0; i < listLen; i++)
+				{
+					TxIn obj = default;
+					ReadWrite(ref obj);
+					list.Add(obj);
+				}
+			}
+		}
+		public void ReadWrite(ref TxOutList list)
+		{
+			int listLen = 0;
+			if (Serializing)
+			{
+				var len = list == null ? 0 : (ulong)list.Count;
+				if (len > (uint)MaxArraySize)
+					throw new ArgumentOutOfRangeException("Array size too big");
+				VarInt.StaticWrite(this, len);
+				if (len == 0)
+					return;
+				listLen = (int)len;
+				foreach (var obj in list)
+				{
+					ReadWrite(obj);
+				}
+			}
+			else
+			{
+				var len = VarInt.StaticRead(this);
+				if (len > (uint)MaxArraySize)
+					throw new ArgumentOutOfRangeException("Array size too big");
+				listLen = (int)len;
+				list = new TxOutList(listLen);
+				for (int i = 0; i < listLen; i++)
+				{
+					TxOut obj = default;
+					ReadWrite(ref obj);
+					list.Add(obj);
+				}
 			}
 		}
 
@@ -364,7 +412,7 @@ namespace NBitcoin
 		}
 
 #if HAS_SPAN
-		private void ReadWriteBytes(ref byte[] data, int offset = 0, int count = -1)
+		internal void ReadWriteBytes(ref byte[] data, int offset = 0, int count = -1)
 		{
 			if(data == null)
 				throw new ArgumentNullException(nameof(data));
@@ -393,7 +441,7 @@ namespace NBitcoin
 			}
 		}
 #else
-		private void ReadWriteBytes(ref byte[] data, int offset = 0, int count = -1)
+		internal void ReadWriteBytes(ref byte[] data, int offset = 0, int count = -1)
 		{
 			if (data == null)
 				throw new ArgumentNullException(nameof(data));
@@ -467,7 +515,6 @@ namespace NBitcoin
 			});
 		}
 
-#pragma warning disable CS0618 // Type or member is obsolete
 		uint? _ProtocolVersion = null;
 		public uint? ProtocolVersion
 		{
@@ -481,7 +528,6 @@ namespace NBitcoin
 				_ProtocolCapabilities = null;
 			}
 		}
-
 
 		ProtocolCapabilities _ProtocolCapabilities;
 		public ProtocolCapabilities ProtocolCapabilities
@@ -497,7 +543,6 @@ namespace NBitcoin
 				return capabilities;
 			}
 		}
-#pragma warning restore CS0618 // Type or member is obsolete
 
 		TransactionOptions _TransactionSupportedOptions = TransactionOptions.All;
 		public TransactionOptions TransactionOptions
@@ -511,7 +556,6 @@ namespace NBitcoin
 				_TransactionSupportedOptions = value;
 			}
 		}
-
 
 		public IDisposable ProtocolVersionScope(uint? version)
 		{
@@ -537,7 +581,6 @@ namespace NBitcoin
 			MaxArraySize = from.MaxArraySize;
 			Type = from.Type;
 		}
-
 
 		public SerializationType Type
 		{

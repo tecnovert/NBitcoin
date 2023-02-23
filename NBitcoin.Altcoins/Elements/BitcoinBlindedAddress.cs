@@ -35,9 +35,8 @@ namespace NBitcoin.Altcoins.Elements
 						hash = vchData.SafeSubarray(version.Length + 32, vchData.Length - version.Length - 32);
 						script = true;
 					}
-					if (PubKey.Check(blinding, true))
+					if (PubKey.TryCreatePubKey(blinding, out _BlindingKey))
 					{
-						_BlindingKey = new PubKey(blinding);
 						if (witnessVerion == 0)
 						{
 							_UnblindedAddress =script?  (BitcoinAddress) new BitcoinWitScriptAddress(new WitScriptId(hash), network):  new BitcoinWitPubKeyAddress(new WitKeyId(hash), network);
@@ -71,10 +70,8 @@ namespace NBitcoin.Altcoins.Elements
 				if (vchData.Length != prefix.Length + version.Length + 33 + 20)
 					throw new FormatException("Invalid Bitcoin Blinded Address");
 				var blinding = vchData.SafeSubarray(prefix.Length + version.Length, 33);
-				if (PubKey.Check(blinding, true))
+				if (PubKey.TryCreatePubKey(blinding, out _BlindingKey))
 				{
-					_BlindingKey = new PubKey(blinding);
-
 					var hash = vchData.SafeSubarray(prefix.Length + version.Length + 33, 20);
 					_UnblindedAddress =
 						p2pkh
@@ -109,7 +106,7 @@ namespace NBitcoin.Altcoins.Elements
 				byte witVer;
 				byte[] witProg;
 				var blech32Encoder = address.Network.GetBech32Encoder(Bech32Type.BLINDED_ADDRESS, true);
-				Bech32Encoder bech32Encoder = null;
+				Bech32Encoder bech32Encoder;
 				switch (address)
 				{
 					case BitcoinWitPubKeyAddress _:
@@ -127,16 +124,14 @@ namespace NBitcoin.Altcoins.Elements
 			}
 			else
 			{
-
-
+				// Is Base58
 				var network = address.Network;
-				var keyId = address.ScriptPubKey.GetDestination();
-				if (keyId == null)
-					throw new ArgumentException("The passed address can't be reduced to a hash");
+				var base58Unblinded = network.GetBase58CheckEncoder().DecodeData(address.ToString());
+				var prefix = network.GetVersionBytes(((IBase58Data)address).Type, true);
 				var bytes = address.Network.GetVersionBytes(Base58Type.BLINDED_ADDRESS, true).Concat(
-					network.GetVersionBytes(((IBase58Data) address).Type, true), blindingKey.ToBytes(),
-					keyId.ToBytes());
-				return NBitcoin.DataEncoders.Encoders.Base58Check.EncodeData(bytes);
+					prefix, blindingKey.ToBytes(),
+					base58Unblinded.Skip(prefix.Length).ToArray());
+				return network.GetBase58CheckEncoder().EncodeData(bytes);
 			}
 		}
 

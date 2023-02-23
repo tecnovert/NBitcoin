@@ -8,6 +8,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
+using System.Reflection;
 
 namespace NBitcoin.Altcoins
 {
@@ -37,10 +38,21 @@ namespace NBitcoin.Altcoins
 			{
 				return new DogecoinBlock(new DogecoinBlockHeader());
 			}
+			public override Transaction CreateTransaction()
+			{
+				return new DogeTransaction();
+			}
+			public override TxOut CreateTxOut()
+			{
+				return new DogeTxOut();
+			}
 			protected override TransactionBuilder CreateTransactionBuilderCore(Network network)
 			{
+				// https://github.com/dogecoin/dogecoin/blob/master/doc/fee-recommendation.md
 				var txBuilder = base.CreateTransactionBuilderCore(network);
-				txBuilder.StandardTransactionPolicy.MinFee = Money.Coins(1m);
+				txBuilder.StandardTransactionPolicy.MinRelayTxFee = new FeeRate(Money.Coins(0.001m), 1000);
+				// Around 3000 USD of fee for a transaction at ~0.4 USD per doge
+				txBuilder.StandardTransactionPolicy.MaxTxFee = new FeeRate(Money.Coins(56m), 1);
 				return txBuilder;
 			}
 		}
@@ -157,7 +169,25 @@ namespace NBitcoin.Altcoins
 				stream.ReadWrite(ref parentBlock);
 			}
 		}
-
+		public class DogeTransaction : Transaction
+		{
+			public override ConsensusFactory GetConsensusFactory()
+			{
+				return Dogecoin.DogeConsensusFactory.Instance;
+			}
+		}
+		public class DogeTxOut : TxOut
+		{
+			public override Money GetDustThreshold()
+			{
+				// https://github.com/dogecoin/dogecoin/blob/master/doc/fee-recommendation.md
+				return Money.Coins(0.01m);
+			}
+			public override ConsensusFactory GetConsensusFactory()
+			{
+				return Dogecoin.DogeConsensusFactory.Instance;
+			}
+		}
 		public class DogecoinBlock : Block
 		{
 			public DogecoinBlock(DogecoinBlockHeader header) : base(header)
@@ -207,6 +237,47 @@ namespace NBitcoin.Altcoins
 				}
 			}
 		}
+
+		public class DogecoinTestnetAddressStringParser : NetworkStringParser
+		{
+			public override bool TryParse(string str, Network network, Type targetType, out IBitcoinString result)
+			{
+				if (str.StartsWith("tgpv", StringComparison.OrdinalIgnoreCase) && targetType.GetTypeInfo().IsAssignableFrom(typeof(BitcoinExtKey).GetTypeInfo()))
+				{
+					try
+					{
+						var decoded = Encoders.Base58Check.DecodeData(str);
+						decoded[0] = 0x04;
+						decoded[1] = 0x35;
+						decoded[2] = 0x83;
+						decoded[3] = 0x94;
+						result = new BitcoinExtKey(Encoders.Base58Check.EncodeData(decoded), network);
+						return true;
+					}
+					catch
+					{
+					}
+				}
+				if (str.StartsWith("tgub", StringComparison.OrdinalIgnoreCase) && targetType.GetTypeInfo().IsAssignableFrom(typeof(BitcoinExtPubKey).GetTypeInfo()))
+				{
+					try
+					{
+						var decoded = Encoders.Base58Check.DecodeData(str);
+						decoded[0] = 0x04;
+						decoded[1] = 0x35;
+						decoded[2] = 0x87;
+						decoded[3] = 0xCF;
+						result = new BitcoinExtPubKey(Encoders.Base58Check.EncodeData(decoded), network);
+						return true;
+					}
+					catch
+					{
+					}
+				}
+				return base.TryParse(str, network, targetType, out result);
+			}
+		}
+
 #pragma warning restore CS0618 // Type or member is obsolete
 
 		//Format visual studio
@@ -215,14 +286,6 @@ namespace NBitcoin.Altcoins
 		//static Tuple<byte[], int>[] pnSeed6_main = null;
 		//static Tuple<byte[], int>[] pnSeed6_test = null;
 		// Not used in DOGE: https://github.com/dogecoin/dogecoin/blob/10a5e93a055ab5f239c5447a5fe05283af09e293/src/chainparams.cpp#L135
-		
-
-		static uint256 GetPoWHash(BlockHeader header)
-		{
-			var headerBytes = header.ToBytes();
-			var h = NBitcoin.Crypto.SCrypt.ComputeDerivedKey(headerBytes, headerBytes, 1024, 1, 1, null, 32);
-			return new uint256(h);
-		}
 
 		protected override NetworkBuilder CreateMainnet()
 		{
@@ -260,6 +323,7 @@ namespace NBitcoin.Altcoins
 			.AddAlias("doge-mainnet")
 			.AddAlias("dogecoin-mainnet")
 			.AddAlias("dogecoin-main")
+			.SetUriScheme("dogecoin")
 			.AddDNSSeeds(new[]
 			{
 				new DNSSeedData("dogecoin.com", "seed.dogecoin.com"),
@@ -300,6 +364,7 @@ namespace NBitcoin.Altcoins
 			.SetBase58Bytes(Base58Type.SECRET_KEY, new byte[] { 241 })
 			.SetBase58Bytes(Base58Type.EXT_PUBLIC_KEY, new byte[] { 0x04, 0x35, 0x87, 0xCF })
 			.SetBase58Bytes(Base58Type.EXT_SECRET_KEY, new byte[] { 0x04, 0x35, 0x83, 0x94 })
+			.SetNetworkStringParser(new DogecoinTestnetAddressStringParser())
 			.SetBech32(Bech32Type.WITNESS_PUBKEY_ADDRESS, Encoders.Bech32("tdoge"))
 			.SetBech32(Bech32Type.WITNESS_SCRIPT_ADDRESS, Encoders.Bech32("tdoge"))
 			.SetMagic(0xdcb7c1fc)
@@ -309,6 +374,7 @@ namespace NBitcoin.Altcoins
 		   .AddAlias("doge-testnet")
 		   .AddAlias("dogecoin-test")
 		   .AddAlias("dogecoin-testnet")
+		   .SetUriScheme("dogecoin")
 		   .AddDNSSeeds(new[]
 		   {
 				new DNSSeedData("jrn.me.uk", "testseed.jrn.me.uk")
@@ -340,9 +406,9 @@ namespace NBitcoin.Altcoins
 				ConsensusFactory = DogeConsensusFactory.Instance,
 				SupportSegwit = false
 			})
-			.SetBase58Bytes(Base58Type.PUBKEY_ADDRESS, new byte[] { 113 })
+			.SetBase58Bytes(Base58Type.PUBKEY_ADDRESS, new byte[] { 111 })
 			.SetBase58Bytes(Base58Type.SCRIPT_ADDRESS, new byte[] { 196 })
-			.SetBase58Bytes(Base58Type.SECRET_KEY, new byte[] { 241 })
+			.SetBase58Bytes(Base58Type.SECRET_KEY, new byte[] { 239 })
 			.SetBase58Bytes(Base58Type.EXT_PUBLIC_KEY, new byte[] { 0x04, 0x35, 0x87, 0xCF })
 			.SetBase58Bytes(Base58Type.EXT_SECRET_KEY, new byte[] { 0x04, 0x35, 0x83, 0x94 })
 			.SetBech32(Bech32Type.WITNESS_PUBKEY_ADDRESS, Encoders.Bech32("tdoge"))
@@ -354,6 +420,7 @@ namespace NBitcoin.Altcoins
 			.AddAlias("doge-regtest")
 			.AddAlias("dogecoin-regtest")
 			.AddAlias("dogecoin-reg")
+			.SetUriScheme("dogecoin")
 			.AddDNSSeeds(new DNSSeedData[0])
 			.AddSeeds(new NetworkAddress[0])
 			.SetGenesis("010000000000000000000000000000000000000000000000000000000000000000000000696ad20e2dd4365c7459b4a4a5af743d5e92c6da3229e6532cd605f6533f2a5bdae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff1004ffff001d0104084e696e746f6e646fffffffff010058850c020000004341040184710fa689ad5023690c80f3a49c8f13f8d45b8c857fbcbc8bc4a8e4d3eb4b10f4d4604fa08dce601aaf0f470216fe1b51850b4acf21b179c45070ac7b03a9ac00000000");

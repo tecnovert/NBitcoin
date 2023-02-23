@@ -35,7 +35,6 @@ namespace NBitcoin.Altcoins
 			Tuple.Create(new byte[]{0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xff,0xff,0x34,0xaf,0xf4,0x16}, 18168)
 		};
 
-#pragma warning disable CS0618 // Type or member is obsolete
 		public class ZCoinConsensusFactory : ConsensusFactory
 		{
 			private ZCoinConsensusFactory()
@@ -54,6 +53,7 @@ namespace NBitcoin.Altcoins
 			}
 		}
 
+#pragma warning disable CS0618 // Type or member is obsolete
 		public class ZCoinBlockHeader : BlockHeader
 		{
 			public override uint256 GetPoWHash()
@@ -74,7 +74,6 @@ namespace NBitcoin.Altcoins
 				return ZCoinConsensusFactory.Instance;
 			}
 		}
-
 #pragma warning restore CS0618 // Type or member is obsolete
 
 		protected override void PostInit()
@@ -100,7 +99,8 @@ namespace NBitcoin.Altcoins
 				RuleChangeActivationThreshold = 1916,
 				MinerConfirmationWindow = 2016,
 				CoinbaseMaturity = 100,
-				ConsensusFactory = ZCoinConsensusFactory.Instance
+				ConsensusFactory = ZCoinConsensusFactory.Instance,
+				SupportSegwit = true
 			})
 			.SetBase58Bytes(Base58Type.PUBKEY_ADDRESS, new byte[] { 82 })
 			.SetBase58Bytes(Base58Type.SCRIPT_ADDRESS, new byte[] { 07 })
@@ -148,7 +148,8 @@ namespace NBitcoin.Altcoins
 				RuleChangeActivationThreshold = 1,
 				MinerConfirmationWindow = 2,
 				CoinbaseMaturity = 100,
-				ConsensusFactory = ZCoinConsensusFactory.Instance
+				ConsensusFactory = ZCoinConsensusFactory.Instance,
+				SupportSegwit = true
 			})
 			.SetBase58Bytes(Base58Type.PUBKEY_ADDRESS, new byte[] { 65 })
 			.SetBase58Bytes(Base58Type.SCRIPT_ADDRESS, new byte[] { 178 })
@@ -193,7 +194,8 @@ namespace NBitcoin.Altcoins
 				RuleChangeActivationThreshold = 108,
 				MinerConfirmationWindow = 144,
 				CoinbaseMaturity = 100,
-				ConsensusFactory = ZCoinConsensusFactory.Instance
+				ConsensusFactory = ZCoinConsensusFactory.Instance,
+				SupportSegwit = true
 			})
 			.SetBase58Bytes(Base58Type.PUBKEY_ADDRESS, new byte[] { 65 })
 			.SetBase58Bytes(Base58Type.SCRIPT_ADDRESS, new byte[] { 178 })

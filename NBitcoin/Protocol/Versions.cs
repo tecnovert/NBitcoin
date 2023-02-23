@@ -43,14 +43,6 @@ namespace NBitcoin.Protocol
 		}
 
 		/// <summary>
-		/// "reject" command
-		/// </summary>
-		public bool SupportReject
-		{
-			get; set;
-		}
-
-		/// <summary>
 		/// ! "filter*" commands are disabled without NODE_BLOOM after and including this version
 		/// </summary>
 		public bool SupportNodeBloom
@@ -106,6 +98,12 @@ namespace NBitcoin.Protocol
 			set;
 		}
 
+		public bool SupportAddrv2
+		{ 
+			get; 
+			set;
+		}
+
 		public static ProtocolCapabilities CreateSupportAll()
 		{
 			return new ProtocolCapabilities()
@@ -117,11 +115,11 @@ namespace NBitcoin.Protocol
 				SupportMempoolQuery = true,
 				SupportNodeBloom = true,
 				SupportPingPong = true,
-				SupportReject = true,
 				SupportSendHeaders = true,
 				SupportTimeAddress = true,
 				SupportUserAgent = true,
-				SupportWitness = true
+				SupportWitness = true,
+				SupportAddrv2 = true
 			};
 		}
 
@@ -133,12 +131,12 @@ namespace NBitcoin.Protocol
 				(!capabilities.SupportMempoolQuery || SupportMempoolQuery) &&
 				(!capabilities.SupportNodeBloom || SupportNodeBloom) &&
 				(!capabilities.SupportPingPong || SupportPingPong) &&
-				(!capabilities.SupportReject || SupportReject) &&
 				(!capabilities.SupportSendHeaders || SupportSendHeaders) &&
 				(!capabilities.SupportTimeAddress || SupportTimeAddress) &&
 				(!capabilities.SupportWitness || SupportWitness) &&
 				(!capabilities.SupportUserAgent || SupportUserAgent) &&
-				(!capabilities.SupportCheckSum || SupportCheckSum);
+				(!capabilities.SupportCheckSum || SupportCheckSum) &&
+				(!capabilities.SupportAddrv2 || SupportAddrv2);
 		}
 	}
 }

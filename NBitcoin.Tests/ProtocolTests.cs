@@ -38,12 +38,12 @@ namespace NBitcoin.Tests
 					var b = _Rand.Next(4000, 60000);
 					_Server1 = new NodeServer(network, internalPort: a);
 					_Server1.AllowLocalPeers = true;
-					_Server1.ExternalEndpoint = new IPEndPoint(IPAddress.Parse("127.0.0.1").MapToIPv6Ex(), a);
+					_Server1.ExternalEndpoint = new IPEndPoint(IPAddress.Parse("127.0.0.1").MapToIPv6(), a);
 					_Server1.Listen();
 					Assert.True(_Server1.IsListening);
 					_Server2 = new NodeServer(network, internalPort: b);
 					_Server2.AllowLocalPeers = true;
-					_Server2.ExternalEndpoint = new IPEndPoint(IPAddress.Parse("127.0.0.1").MapToIPv6Ex(), b);
+					_Server2.ExternalEndpoint = new IPEndPoint(IPAddress.Parse("127.0.0.1").MapToIPv6(), b);
 					_Server2.Listen();
 					Assert.True(_Server2.IsListening);
 					break;
@@ -136,6 +136,12 @@ namespace NBitcoin.Tests
 	}
 	public class ProtocolTests
 	{
+		private readonly ITestOutputHelper logs;
+
+		public ProtocolTests(ITestOutputHelper testOutputHelper)
+		{
+			this.logs = testOutputHelper;
+		}
 
 		[Fact]
 		[Trait("UnitTest", "UnitTest")]
@@ -163,8 +169,7 @@ namespace NBitcoin.Tests
 							var version = (VersionPayload)o;
 							Assert.Equal((ulong)0x1357B43A2C209DDD, version.Nonce);
 							Assert.Equal("", version.UserAgent);
-							Assert.Equal("::ffff:10.0.0.2", version.AddressFrom.Address.ToString());
-							Assert.Equal(8333, version.AddressFrom.Port);
+							Assert.Equal("[::ffff:10.0.0.2]:8333", version.AddressFrom.ToString());
 							Assert.Equal(0x00018155, version.StartHeight);
 							Assert.Equal<uint>(31900, version.Version);
 						})
@@ -234,6 +239,101 @@ namespace NBitcoin.Tests
 				seed.Disconnect();
 				Assert.True(seed.State == NodeState.Offline);
 				Assert.NotNull(seed.TimeOffset);
+			}
+		}
+
+		[Fact]
+		[Trait("Protocol", "Protocol")]
+		public void CanProcessAddressGossip()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var node = builder.CreateNode(true);
+				var rpc = node.CreateRPCClient();
+				for (var i = 1; i < 101; i++)
+				{
+					for (var j = 1; j < 101; j++)
+					{
+						var ip = IPAddress.Parse($"{i}.{j}.1.1");
+						rpc.AddPeerAddress(ip, 8333);
+					}
+				}
+
+				using (var nodeClient = node.CreateNodeClient())
+				{
+					nodeClient.VersionHandshake();
+					AddrV2Payload addr;
+					using (var list = nodeClient.CreateListener()
+												.Where(m => m.Message.Payload is AddrV2Payload))
+					{
+						nodeClient.SendMessage(new GetAddrPayload());
+
+						addr = list.ReceivePayload<AddrV2Payload>();
+						Assert.Equal(1000, addr.Addresses.Length);
+					}
+				}
+			}
+		}
+
+		[Fact]
+		[Trait("Protocol", "Protocol")]
+		public void CanHandshakeRestrictNodes()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var node = builder.CreateNode(true);
+				var manager = new AddressManager();
+				manager.Add(new NetworkAddress(node.NodeEndpoint), IPAddress.Loopback);
+
+				var nodesRequirement = new NodeRequirement(){ MinStartHeight = 100 };
+				var nodeConnectionParameters = new NodeConnectionParameters()
+				{
+					TemplateBehaviors =
+					{
+						new AddressManagerBehavior(manager)
+						{
+							PeersToDiscover = 1,
+							Mode = AddressManagerBehaviorMode.None
+						}
+					}
+				};
+				var group = new NodesGroup(builder.Network, nodeConnectionParameters, nodesRequirement);
+				group.AllowSameGroup = true;
+				var connecting = WaitConnected(group);
+				try
+				{
+					group.Connect();
+					connecting.GetAwaiter().GetResult();
+				}
+				catch (TaskCanceledException)
+				{
+					// It is expected because no node should connect.
+					Assert.Empty(group.ConnectedNodes); // but we chack it anyway.
+				}
+				finally
+				{
+					group.Disconnect();
+				}
+
+				node.Generate(101);
+				group = new NodesGroup(builder.Network, nodeConnectionParameters, nodesRequirement);
+				group.AllowSameGroup = true;
+				connecting = WaitConnected(group);
+				try
+				{
+					group.Connect();
+					connecting.GetAwaiter().GetResult();
+					Eventually(() =>
+					{
+						Assert.NotEmpty(group.ConnectedNodes);
+						Assert.All(group.ConnectedNodes, connectedNode => 
+							Assert.True(connectedNode.RemoteSocketEndpoint.IsEqualTo(node.NodeEndpoint)));
+					});
+				}
+				finally
+				{
+					group.Disconnect();
+				}
 			}
 		}
 
@@ -332,7 +432,7 @@ namespace NBitcoin.Tests
 				var nodeClient = node.CreateNodeClient();
 				rpc.Generate(101);
 
-				List<TxDestination> knownAddresses = new List<TxDestination>();
+				List<IAddressableDestination> knownAddresses = new List<IAddressableDestination>();
 				var batch = rpc.PrepareBatch();
 				for (int i = 0; i < 20; i++)
 				{
@@ -354,7 +454,7 @@ namespace NBitcoin.Tests
 				{
 					BloomFilter filter = new BloomFilter(1, 0.0001, 50, BloomFlags.UPDATE_NONE);
 					foreach (var a in knownAddresses)
-						filter.Insert(a.ToBytes());
+						filter.Insert(ToBytes(a));
 					nodeClient.SendMessageAsync(new FilterLoadPayload(filter));
 					nodeClient.SendMessageAsync(new GetDataPayload(new InventoryVector(InventoryType.MSG_FILTERED_BLOCK, block.GetHash())));
 					var merkle = list.ReceivePayload<MerkleBlockPayload>();
@@ -393,6 +493,21 @@ namespace NBitcoin.Tests
 					Assert.True(!tree.GetMatchedTransactions().Contains(knownTx));
 				}
 			}
+		}
+
+		private byte[] ToBytes(IAddressableDestination a)
+		{
+			if (a is WitKeyId wk)
+				return wk.ToBytes();
+			if (a is KeyId ki)
+				return ki.ToBytes();
+			if (a is WitScriptId wsk)
+				return wsk.ToBytes();
+			if (a is ScriptId si)
+				return si.ToBytes();
+			if (a is TaprootPubKey tp)
+				return tp.ToBytes();
+			throw new NotSupportedException("Error code 3921: It should, contact NBitcoin developers");
 		}
 
 		[Fact]
@@ -470,30 +585,56 @@ namespace NBitcoin.Tests
 		{
 			using (var builder = NodeBuilderEx.Create())
 			{
-				var nodeClient = builder.CreateNode(true).CreateNodeClient();
+				var nodeClients = new []
+				{
+					builder.CreateNode(true).CreateNodeClient(),
+					builder.CreateNode(true).CreateNodeClient()
+				};
+				logs.WriteLine("Creating node0 with 300 blocks and node1 with 600 blocks");
 				builder.Nodes[0].Generate(300);
-				var rpc = builder.Nodes[0].CreateRPCClient();
-				var slimChain = nodeClient.GetSlimChain(rpc.GetBlockHash(200));
+				builder.Nodes[1].Generate(600);
+
+				var rpcs = new[]
+				{
+					builder.Nodes[0].CreateRPCClient(),
+					builder.Nodes[1].CreateRPCClient(),
+				};
+
+				logs.WriteLine("Let's check if we can get the slim chain from node0 up to 200");
+				var slimChain = nodeClients[0].GetSlimChain(rpcs[0].GetBlockHash(200));
 				Assert.True(slimChain.Height == 200);
 
-				var node2 = builder.CreateNode(true);
-				var nodeClient2 = node2.CreateNodeClient();
-				var rpc2 = node2.CreateRPCClient();
-				rpc2.Generate(600);
+				logs.WriteLine("Let's check if we can now synchronize to tip of node1 (reorg of 200 blocks + 600 blocks)");
+				nodeClients[1].SynchronizeSlimChain(slimChain);
+				Assert.Equal(slimChain.Tip, rpcs[1].GetBestBlockHash());
 
-				nodeClient2.SynchronizeSlimChain(slimChain);
-				Assert.Equal(slimChain.Tip, rpc2.GetBestBlockHash());
-
-				nodeClient.Behaviors.Add(new SlimChainBehavior(slimChain));
-
+				logs.WriteLine("Let's now use a SlimChainBehavior to sync back to node0 (300 blocks)");
+				nodeClients[0].Behaviors.Add(new SlimChainBehavior(slimChain));
 				Eventually(() =>
 				{
-					Assert.Equal(slimChain.Tip, rpc.GetBestBlockHash());
+					try
+					{
+						Assert.Equal(slimChain.Tip, rpcs[0].GetBestBlockHash());
+					}
+					catch
+					{
+						logs.WriteLine("Chain tip is now at " + slimChain.Height);
+						throw;
+					}
 				});
-				node2.Sync(builder.Nodes[0]);
+				logs.WriteLine("Let's now reorg node0 to node1 (600 blocks) and see if the SlimChainBehavior can keep up");
+				builder.Nodes[1].Sync(builder.Nodes[0]);
 				Eventually(() =>
 				{
-					Assert.Equal(slimChain.Tip, rpc2.GetBestBlockHash());
+					try
+					{
+						Assert.Equal(slimChain.Tip, rpcs[1].GetBestBlockHash());
+					}
+					catch
+					{
+						logs.WriteLine("Chain tip is now at " + slimChain.Height);
+						throw;
+					}
 				});
 			}
 		}
@@ -558,6 +699,7 @@ namespace NBitcoin.Tests
 
 #if !NOFILEIO
 		[Fact]
+		[Trait("UnitTest", "UnitTest")]
 		public void CanConnectToRandomNode()
 		{
 			Stopwatch watch = new Stopwatch();
@@ -865,6 +1007,21 @@ namespace NBitcoin.Tests
 			}
 		}
 
+		// Disabled because it relies on tor which make tests shaky
+		//[Fact]
+		//[Trait("UnitTest", "UnitTest")]
+#pragma warning disable xUnit1013 // Public method should be marked as test
+		public async Task CanResolveTor()
+#pragma warning restore xUnit1013 // Public method should be marked as test
+		{
+			var resolver = new DnsSocksResolver(Utils.ParseEndpoint("localhost", 9050));
+			var ex1 = await Assert.ThrowsAsync<SocketException>(async () => await resolver.GetHostAddressesAsync("googlekefwjefjfwqk.com", default));
+			var ex2 = await Assert.ThrowsAsync<SocketException>(async () => await DnsResolver.Instance.GetHostAddressesAsync("googlekefwjefjfwqk.com", default));
+			Assert.Equal(ex1.ErrorCode, ex2.ErrorCode);
+			var ip = await resolver.GetHostAddressesAsync("google.com", default);
+			Assert.NotNull(ip);
+		}
+
 		[Fact]
 		[Trait("UnitTest", "UnitTest")]
 		public void CanExchangeFastPingPong()
@@ -920,7 +1077,7 @@ namespace NBitcoin.Tests
 				Assert.Equal(2, nodeCount);
 				n2.PingPong();
 				n1.PingPong();
-				Assert.Throws<ProtocolException>(() => n2.VersionHandshake());
+				Assert.Throws<InvalidOperationException>(() => n2.VersionHandshake());
 				Thread.Sleep(100);
 				n2.PingPong();
 				Assert.Equal(2, nodeCount);
@@ -938,21 +1095,6 @@ namespace NBitcoin.Tests
 			block.Transactions.Add(Network.Main.Consensus.ConsensusFactory.CreateTransaction());
 			var cmpct = new CmpctBlockPayload(block);
 			cmpct.Clone();
-		}
-
-		[Fact]
-		[Trait("UnitTest", "UnitTest")]
-		public void CanParseReject()
-		{
-			var hex = "f9beb4d972656a6563740000000000003a000000db7f7e7802747812156261642d74786e732d696e707574732d7370656e74577a9694da4ff41ae999f6591cff3749ad6a7db19435f3d8af5fecbcff824196";
-			Message message = new Message();
-			message.ReadWrite(Encoders.Hex.DecodeData(hex), Network.Main);
-			var reject = (RejectPayload)message.Payload;
-			Assert.True(reject.Message == "tx");
-			Assert.True(reject.Code == RejectCode.DUPLICATE);
-			Assert.True(reject.CodeType == RejectCodeType.Transaction);
-			Assert.True(reject.Reason == "bad-txns-inputs-spent");
-			Assert.True(reject.Hash == uint256.Parse("964182ffbcec5fafd8f33594b17d6aad4937ff1c59f699e91af44fda94967a57"));
 		}
 
 		[Fact]

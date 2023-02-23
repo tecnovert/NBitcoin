@@ -90,45 +90,11 @@ namespace NBitcoin.Protocol
 			get;
 			set;
 		}
-		[Obsolete("Use SocketSettings.ReceiveBufferSize instead")]
-		public int ReceiveBufferSize
-		{
-			get
-			{
-				return SocketSettings.ReceiveBufferSize is int v ? v : 1048576;
-			}
-			set
-			{
-				SocketSettings.ReceiveBufferSize = value;
-			}
-		}
-
-		[Obsolete("Use SocketSettings.SendBufferSize instead")]
-		public int SendBufferSize
-		{
-			get
-			{
-				return SocketSettings.SendBufferSize is int v ? v : 1048576;
-			}
-			set
-			{
-				SocketSettings.SendBufferSize = value;
-			}
-		}
 
 		public SocketSettings SocketSettings { get; set; } = new SocketSettings();
 
 		public IEnpointConnector EndpointConnector { get; set; } = new DefaultEndpointConnector();
 
-		/// <summary>
-		/// Whether we reuse a 1MB buffer for deserializing messages, for limiting GC activity (Default : true)
-		/// </summary>
-		[Obsolete("Ignored, all arrays are allocated through ArrayPool")]
-		public bool ReuseBuffer
-		{
-			get;
-			set;
-		}
 		public CancellationToken ConnectCancellation
 		{
 			get;
@@ -149,7 +115,7 @@ namespace NBitcoin.Protocol
 			return new NodeConnectionParameters(this);
 		}
 
-		public IPEndPoint AddressFrom
+		public EndPoint AddressFrom
 		{
 			get;
 			set;
@@ -161,7 +127,7 @@ namespace NBitcoin.Protocol
 			set;
 		}
 
-		public VersionPayload CreateVersion(IPEndPoint peer, Network network)
+		public VersionPayload CreateVersion(EndPoint peer, Network network)
 		{
 			VersionPayload version = new VersionPayload()
 			{
@@ -170,7 +136,7 @@ namespace NBitcoin.Protocol
 				Version = Version == null ? network.MaxP2PVersion : Version.Value,
 				Timestamp = DateTimeOffset.UtcNow,
 				AddressReceiver = peer,
-				AddressFrom = AddressFrom ?? new IPEndPoint(IPAddress.Parse("0.0.0.0").MapToIPv6Ex(), network.DefaultPort),
+				AddressFrom = AddressFrom ?? new IPEndPoint(IPAddress.Parse("0.0.0.0").MapToIPv6(), network.DefaultPort),
 				Relay = IsRelay,
 				Services = Services
 			};

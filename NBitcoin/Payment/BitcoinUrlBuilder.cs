@@ -1,4 +1,5 @@
-﻿using System;
+﻿#nullable enable
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -19,9 +20,16 @@ namespace NBitcoin.Payment
 	/// </summary>
 	public class BitcoinUrlBuilder
 	{
+		[Obsolete("Use BitcoinUrlBuilder(Network) instead")]
 		public BitcoinUrlBuilder()
 		{
-
+			Network = Bitcoin.Instance.Mainnet;
+			scheme = "bitcoin";
+		}
+		public BitcoinUrlBuilder(Network network)
+		{
+			Network = network;
+			scheme = network.UriScheme;
 		}
 		public BitcoinUrlBuilder(Uri uri, Network network)
 			: this(uri.AbsoluteUri, network)
@@ -30,20 +38,30 @@ namespace NBitcoin.Payment
 				throw new ArgumentNullException(nameof(uri));
 		}
 
+		public Network Network { get; }
+		string scheme;
+
 		public BitcoinUrlBuilder(string uri, Network network)
 		{
 			if (uri == null)
 				throw new ArgumentNullException(nameof(uri));
-			if (!uri.StartsWith("bitcoin:", StringComparison.OrdinalIgnoreCase))
-				throw new FormatException("Invalid scheme");
 			if (network == null)
 				throw new ArgumentNullException(nameof(network));
-			uri = uri.Remove(0, "bitcoin:".Length);
+			scheme = network.UriScheme;
+			if (!uri.StartsWith($"{scheme}:", StringComparison.OrdinalIgnoreCase))
+			{
+				if (uri.StartsWith("bitcoin:", StringComparison.OrdinalIgnoreCase))
+					scheme = "bitcoin";
+				else
+					throw new FormatException("Invalid scheme");
+			}
+			Network = network;
+			uri = uri.Remove(0, $"{scheme}:".Length);
 			if (uri.StartsWith("//"))
 				uri = uri.Remove(0, 2);
 
 			var paramStart = uri.IndexOf('?');
-			string address = null;
+			string? address = null;
 			if (paramStart == -1)
 				address = uri;
 			else
@@ -81,94 +99,45 @@ namespace NBitcoin.Payment
 				Message = parameters["message"];
 				parameters.Remove("message");
 			}
-#pragma warning disable CS0618 // Type or member is obsolete
-			if (parameters.ContainsKey("r"))
-			{
-				PaymentRequestUrl = new Uri(parameters["r"], UriKind.Absolute);
-				parameters.Remove("r");
-			}
-#pragma warning restore CS0618 // Type or member is obsolete
-			_UnknowParameters = parameters;
+			_UnknownParameters = parameters;
 			var reqParam = parameters.Keys.FirstOrDefault(k => k.StartsWith("req-", StringComparison.OrdinalIgnoreCase));
 			if (reqParam != null)
 				throw new FormatException("Non compatible required parameter " + reqParam);
 		}
 
-		private readonly Dictionary<string, string> _UnknowParameters = new Dictionary<string, string>();
+		private readonly Dictionary<string, string> _UnknownParameters = new Dictionary<string, string>();
+		public IReadOnlyDictionary<string, string> UnknownParameters
+		{
+			get
+			{
+				return _UnknownParameters;
+			}
+		}
+		[Obsolete("Use UnknownParameters property")]
 		public Dictionary<string, string> UnknowParameters
 		{
 			get
 			{
-				return _UnknowParameters;
+				return _UnknownParameters;
 			}
 		}
-#if !NOHTTPCLIENT
-		[Obsolete("BIP70 is obsolete")]
-		public PaymentRequest GetPaymentRequest()
-		{
-			if (PaymentRequestUrl == null)
-				throw new InvalidOperationException("No PaymentRequestUrl specified");
 
-			return GetPaymentRequestAsync().GetAwaiter().GetResult();
-		}
-		[Obsolete("BIP70 is obsolete")]
-		public async Task<PaymentRequest> GetPaymentRequestAsync(HttpClient httpClient = null)
-		{
-			if (PaymentRequestUrl == null)
-				throw new InvalidOperationException("No PaymentRequestUrl specified");
-
-			bool own = false;
-			if (httpClient == null)
-			{
-				httpClient = new HttpClient();
-				own = true;
-			}
-			try
-			{
-				HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Get, PaymentRequestUrl);
-				req.Headers.Clear();
-				req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(PaymentRequest.MediaType));
-
-				var result = await httpClient.SendAsync(req).ConfigureAwait(false);
-				if (!result.IsSuccessStatusCode)
-					throw new WebException(result.StatusCode + "(" + (int)result.StatusCode + ")");
-				if (result.Content.Headers.ContentType == null || !result.Content.Headers.ContentType.MediaType.Equals(PaymentRequest.MediaType, StringComparison.OrdinalIgnoreCase))
-				{
-					throw new WebException("Invalid contenttype received, expecting " + PaymentRequest.MediaType + ", but got " + result.Content.Headers.ContentType);
-				}
-				var stream = await result.Content.ReadAsStreamAsync().ConfigureAwait(false);
-				return PaymentRequest.Load(stream);
-			}
-			finally
-			{
-				if (own)
-					httpClient.Dispose();
-			}
-		}
-#endif
-		[Obsolete("BIP70 is obsolete")]
-		public Uri PaymentRequestUrl
+		public BitcoinAddress? Address
 		{
 			get;
 			set;
 		}
-
-		public BitcoinAddress Address
+		public Money? Amount
 		{
 			get;
 			set;
 		}
-		public Money Amount
+		public string? Label
 		{
 			get;
 			set;
 		}
-		public string Label
-		{
-			get;
-			set;
-		}
-		public string Message
+		public string? Message
 		{
 			get;
 			set;
@@ -179,7 +148,7 @@ namespace NBitcoin.Payment
 			{
 				Dictionary<string, string> parameters = new Dictionary<string, string>();
 				StringBuilder builder = new StringBuilder();
-				builder.Append("bitcoin:");
+				builder.Append($"{scheme}:");
 				if (Address != null)
 				{
 					builder.Append(Address.ToString());
@@ -197,14 +166,8 @@ namespace NBitcoin.Payment
 				{
 					parameters.Add("message", Message.ToString());
 				}
-#pragma warning disable CS0618 // Type or member is obsolete
-				if (PaymentRequestUrl != null)
-				{
-					parameters.Add("r", PaymentRequestUrl.ToString());
-				}
-#pragma warning restore CS0618 // Type or member is obsolete
 
-				foreach (var kv in UnknowParameters)
+				foreach (var kv in UnknownParameters)
 				{
 					parameters.Add(kv.Key, kv.Value);
 				}

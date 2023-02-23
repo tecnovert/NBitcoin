@@ -14,7 +14,7 @@ namespace NBitcoin
 	{
 		internal NetworkStringParser _NetworkStringParser = new NetworkStringParser();
 		internal string _Name;
-		internal NetworkType _NetworkType;
+		internal ChainName _ChainName;
 		internal Dictionary<Base58Type, byte[]> _Base58Prefixes = new Dictionary<Base58Type, byte[]>();
 		internal Dictionary<Bech32Type, Bech32Encoder> _Bech32Prefixes = new Dictionary<Bech32Type, Bech32Encoder>();
 		internal List<string> _Aliases = new List<string>();
@@ -29,10 +29,17 @@ namespace NBitcoin
 		internal byte[] _Genesis;
 		internal uint? _MaxP2PVersion;
 		internal INetworkSet _NetworkSet;
+		internal string _UriScheme;
 
 		public NetworkBuilder SetNetworkSet(INetworkSet networkSet)
 		{
 			_NetworkSet = networkSet;
+			return this;
+		}
+
+		public NetworkBuilder SetUriScheme(string uriScheme)
+		{
+			_UriScheme = uriScheme;
 			return this;
 		}
 
@@ -69,7 +76,7 @@ namespace NBitcoin
 			SetRPCPort(network.RPCPort);
 			SetNetworkStringParser(network.NetworkStringParser);
 			SetNetworkSet(network.NetworkSet);
-			SetNetworkType(network.NetworkType);
+			SetChainName(network.ChainName);
 		}
 
 		public NetworkBuilder SetNetworkStringParser(NetworkStringParser networkStringParser)
@@ -144,9 +151,9 @@ namespace NBitcoin
 			return this;
 		}
 
-		public NetworkBuilder SetNetworkType(NetworkType network)
+		public NetworkBuilder SetChainName(ChainName chainName)
 		{
-			_NetworkType = network;
+			_ChainName = chainName;
 			return this;
 		}
 

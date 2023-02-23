@@ -1,18 +1,24 @@
-﻿using System;
+﻿#nullable enable
+using System;
 using System.Collections.Generic;
 using System.Text;
 using UnKnownKVMap = System.Collections.Generic.SortedDictionary<byte[], byte[]>;
 using HDKeyPathKVMap = System.Collections.Generic.SortedDictionary<NBitcoin.PubKey, NBitcoin.RootedKeyPath>;
+using HDTaprootKeyPathKVMap = System.Collections.Generic.SortedDictionary<NBitcoin.TaprootPubKey, NBitcoin.TaprootKeyPath>;
+using NBitcoin.Crypto;
+using System.Collections;
 
 namespace NBitcoin
 {
 	public abstract class PSBTCoin
 	{
 		protected HDKeyPathKVMap hd_keypaths = new HDKeyPathKVMap(PubKeyComparer.Instance);
+		protected HDTaprootKeyPathKVMap hd_taprootkeypaths = new HDTaprootKeyPathKVMap(Comparer<NBitcoin.TaprootPubKey>.Default);
 		protected UnKnownKVMap unknown = new SortedDictionary<byte[], byte[]>(BytesComparer.Instance);
-		protected Script redeem_script;
-		protected Script witness_script;
+		protected Script? redeem_script;
+		protected Script? witness_script;
 		protected readonly PSBT Parent;
+		public PSBT PSBT => Parent;
 		public PSBTCoin(PSBT parent)
 		{
 			hd_keypaths = new HDKeyPathKVMap(PubKeyComparer.Instance);
@@ -35,8 +41,29 @@ namespace NBitcoin
 				return hd_keypaths;
 			}
 		}
+		public HDTaprootKeyPathKVMap HDTaprootKeyPaths
+		{
+			get
+			{
+				return hd_taprootkeypaths;
+			}
+		}
 
-		public Script RedeemScript
+		public IEnumerable<KeyValuePair<IPubKey, RootedKeyPath>> EnumerateKeyPaths()
+		{
+			foreach (var v in hd_keypaths)
+			{
+				yield return new KeyValuePair<IPubKey, RootedKeyPath>(v.Key, v.Value);
+			}
+			foreach (var v in hd_taprootkeypaths)
+			{
+				yield return new KeyValuePair<IPubKey, RootedKeyPath>(v.Key, v.Value.RootedKeyPath);
+			}
+		}
+
+		public TaprootInternalPubKey? TaprootInternalKey { get; set; }
+
+		public Script? RedeemScript
 		{
 			get
 			{
@@ -48,7 +75,7 @@ namespace NBitcoin
 			}
 		}
 
-		public Script WitnessScript
+		public Script? WitnessScript
 		{
 			get
 			{
@@ -64,7 +91,7 @@ namespace NBitcoin
 		{
 			if (rootedKeyPath == null)
 				throw new ArgumentNullException(nameof(rootedKeyPath));
-			if (pubKey == null)
+			if (pubKey is null)
 				throw new ArgumentNullException(nameof(pubKey));
 			hd_keypaths.AddOrReplace(pubKey, rootedKeyPath);
 
@@ -82,13 +109,13 @@ namespace NBitcoin
 			}
 		}
 
-		public abstract Coin GetCoin();
+		public abstract Coin? GetCoin();
 
-		public Coin GetSignableCoin()
+		public Coin? GetSignableCoin()
 		{
 			return GetSignableCoin(out _);
 		}
-		public virtual Coin GetSignableCoin(out string error)
+		public virtual Coin? GetSignableCoin(out string? error)
 		{
 			var coin = GetCoin();
 			if (coin == null)
@@ -98,45 +125,47 @@ namespace NBitcoin
 			}
 			if (PayToScriptHashTemplate.Instance.ExtractScriptPubKeyParameters(coin.ScriptPubKey) is ScriptId scriptId)
 			{
-				if (RedeemScript == null)
+				var redeemScript = GetRedeemScript();
+				if (redeemScript == null)
 				{
 					error = "Spending p2sh output but redeem_script is not set";
 					return null;
 				}
 
-				if (RedeemScript.Hash != scriptId)
+				if (redeemScript.Hash != scriptId)
 				{
 					error = "Spending p2sh output but redeem_script is not matching the utxo scriptPubKey";
 					return null;
 				}
 
-				if (PayToWitTemplate.Instance.ExtractScriptPubKeyParameters2(RedeemScript) is WitProgramParameters prog
+				if (PayToWitTemplate.Instance.ExtractScriptPubKeyParameters2(redeemScript) is WitProgramParameters prog
 					&& prog.NeedWitnessRedeemScript())
 				{
-					if (WitnessScript == null)
+					var witnessScript = GetWitnessScript();
+					if (witnessScript == null)
 					{
 						error = "Spending p2sh-p2wsh output but witness_script is not set";
 						return null;
 					}
-					if (!prog.VerifyWitnessRedeemScript(WitnessScript))
+					if (!prog.VerifyWitnessRedeemScript(witnessScript))
 					{
 						error = "Spending p2sh-p2wsh output but witness_script does not match redeem_script";
 						return null;
 					}
-					coin = coin.ToScriptCoin(WitnessScript);
+					coin = coin.ToScriptCoin(witnessScript);
 					error = null;
 					return coin;
 				}
 				else
 				{
-					coin = coin.ToScriptCoin(RedeemScript);
+					coin = coin.ToScriptCoin(redeemScript);
 					error = null;
 					return coin;
 				}
 			}
 			else
 			{
-				if (RedeemScript != null)
+				if (GetRedeemScript() != null)
 				{
 					error = "Spending non p2sh output but redeem_script is set";
 					return null;
@@ -144,17 +173,18 @@ namespace NBitcoin
 				if (PayToWitTemplate.Instance.ExtractScriptPubKeyParameters2(coin.ScriptPubKey) is WitProgramParameters prog
 					&& prog.NeedWitnessRedeemScript())
 				{
-					if (WitnessScript == null)
+					var witnessScript = GetWitnessScript();
+					if (witnessScript == null)
 					{
 						error = "Spending p2wsh output but witness_script is not set";
 						return null;
 					}
-					if (!prog.VerifyWitnessRedeemScript(WitnessScript))
+					if (!prog.VerifyWitnessRedeemScript(witnessScript))
 					{
 						error = "Spending p2wsh output but witness_script does not match the scriptPubKey";
 						return null;
 					}
-					coin = coin.ToScriptCoin(WitnessScript);
+					coin = coin.ToScriptCoin(witnessScript);
 					error = null;
 					return coin;
 				}
@@ -165,15 +195,26 @@ namespace NBitcoin
 				}
 			}
 		}
+
+
+		internal virtual Script? GetRedeemScript()
+		{
+			return RedeemScript;
+		}
+		internal virtual Script? GetWitnessScript()
+		{
+			return WitnessScript;
+		}
+
 		/// <summary>
-		/// Filter the keys which contains the <paramref name="accountKey"/> and <paramref name="accountKeyPath"/> in the HDKeys and whose input/output 
+		/// Filter the keys which contains the <paramref name="accountKey"/> and <paramref name="accountKeyPath"/> in the HDKeys and whose input/output
 		/// the same scriptPubKeys as <paramref name="accountHDScriptPubKey"/>.
 		/// </summary>
 		/// <param name="accountHDScriptPubKey">The accountHDScriptPubKey used to generate addresses</param>
 		/// <param name="accountKey">The account key that will be used to sign (ie. 49'/0'/0')</param>
 		/// <param name="accountKeyPath">The account key path</param>
 		/// <returns>HD Keys matching master root key</returns>
-		public IEnumerable<PSBTHDKeyMatch> HDKeysFor(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath accountKeyPath = null)
+		public IEnumerable<PSBTHDKeyMatch> HDKeysFor(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath? accountKeyPath = null)
 		{
 			if (accountKey == null)
 				throw new ArgumentNullException(nameof(accountKey));
@@ -181,12 +222,12 @@ namespace NBitcoin
 				throw new ArgumentNullException(nameof(accountHDScriptPubKey));
 			return HDKeysFor(accountHDScriptPubKey, accountKey, accountKeyPath, accountKey.GetPublicKey().GetHDFingerPrint());
 		}
-		internal IEnumerable<PSBTHDKeyMatch> HDKeysFor(IHDScriptPubKey accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath accountKeyPath, HDFingerprint accountFingerprint)
+		internal IEnumerable<PSBTHDKeyMatch> HDKeysFor(IHDScriptPubKey? accountHDScriptPubKey, IHDKey accountKey, RootedKeyPath? accountKeyPath, HDFingerprint accountFingerprint)
 		{
 			accountKey = accountKey.AsHDKeyCache();
 			accountHDScriptPubKey = accountHDScriptPubKey?.AsHDKeyCache();
 			var coinScriptPubKey = this.GetCoin()?.ScriptPubKey;
-			foreach (var hdKey in HDKeyPaths)
+			foreach (var hdKey in EnumerateKeyPaths())
 			{
 				bool matched = false;
 
@@ -196,10 +237,9 @@ namespace NBitcoin
 					// The fingerprint match, but we need to check the public keys, because fingerprint collision is easy to provoke
 					if (!hdKey.Value.KeyPath.IsHardenedPath || (accountKey.CanDeriveHardenedPath() && (accountHDScriptPubKey == null || accountHDScriptPubKey.CanDeriveHardenedPath())))
 					{
-						if (accountKey.Derive(hdKey.Value.KeyPath).GetPublicKey() == hdKey.Key)
+						if (accountHDScriptPubKey == null || accountHDScriptPubKey.Derive(hdKey.Value.KeyPath).ScriptPubKey == coinScriptPubKey)
 						{
-							if (accountHDScriptPubKey == null || accountHDScriptPubKey.Derive(hdKey.Value.KeyPath).ScriptPubKey == coinScriptPubKey)
-								yield return CreateHDKeyMatch(accountKey, hdKey.Value.KeyPath, hdKey);
+							yield return CreateHDKeyMatch(accountKey, hdKey.Value.KeyPath, hdKey);
 							matched = true;
 						}
 					}
@@ -212,10 +252,9 @@ namespace NBitcoin
 					// The cases where addresses are generated on a non-hardened path below it (eg. 49'/0'/0'/0/1)
 					if (addressPath.Indexes.Length != 0)
 					{
-						if (accountKey.Derive(addressPath).GetPublicKey() == hdKey.Key)
+						if (accountHDScriptPubKey == null || accountHDScriptPubKey.Derive(addressPath).ScriptPubKey == coinScriptPubKey)
 						{
-							if (accountHDScriptPubKey == null || accountHDScriptPubKey.Derive(addressPath).ScriptPubKey == coinScriptPubKey)
-								yield return CreateHDKeyMatch(accountKey, addressPath, hdKey);
+							yield return CreateHDKeyMatch(accountKey, addressPath, hdKey);
 							matched = true;
 						}
 					}
@@ -230,7 +269,7 @@ namespace NBitcoin
 							var indexes = new uint[addressPathSize];
 							Array.Copy(hdKeyIndexes, hdKey.Value.KeyPath.Length - addressPathSize, indexes, 0, addressPathSize);
 							addressPath = new KeyPath(indexes);
-							if (accountKey.Derive(addressPath).GetPublicKey() == hdKey.Key)
+							if (accountKey.Derive(addressPath).GetPublicKey().Equals(hdKey.Key))
 							{
 								if (accountHDScriptPubKey == null || accountHDScriptPubKey.Derive(addressPath).ScriptPubKey == coinScriptPubKey)
 									yield return CreateHDKeyMatch(accountKey, addressPath, hdKey);
@@ -244,6 +283,7 @@ namespace NBitcoin
 			}
 		}
 
-		protected abstract PSBTHDKeyMatch CreateHDKeyMatch(IHDKey accountKey, KeyPath addressKeyPath, KeyValuePair<PubKey, RootedKeyPath> kv);
+		protected abstract PSBTHDKeyMatch CreateHDKeyMatch(IHDKey accountKey, KeyPath addressKeyPath, KeyValuePair<IPubKey, RootedKeyPath> kv);
 	}
 }
+#nullable disable

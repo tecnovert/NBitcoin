@@ -19,17 +19,17 @@ using FsCheck.Xunit;
 using FsCheck;
 using NBitcoin.Tests.Generators;
 using static NBitcoin.Tests.Comparer;
+using System.Net.Http;
+using NBitcoin.Scripting;
 
 namespace NBitcoin.Tests
 {
 	//Require a rpc server on test network running on default port with -rpcuser=NBitcoin -rpcpassword=NBitcoinPassword
-	//For me : 
-	//"bitcoin-qt.exe" -testnet -server -rpcuser=NBitcoin -rpcpassword=NBitcoinPassword 
+	//For me :
+	//"bitcoin-qt.exe" -testnet -server -rpcuser=NBitcoin -rpcpassword=NBitcoinPassword
 	[Trait("RPCClient", "RPCClient")]
 	public class RPCClientTests
 	{
-		const string TestAccount = "NBitcoin.RPCClientTests";
-
 		public PSBTComparer PSBTComparerInstance { get; }
 		public ITestOutputHelper Output { get; }
 
@@ -108,27 +108,34 @@ namespace NBitcoin.Tests
 			using (var builder = NodeBuilderEx.Create())
 			{
 				var node = builder.CreateNode();
-				node.ConfigParameters.Add("wallet", "w1");
-				//node.ConfigParameters.Add("wallet", "w2");
+				var noWalletNode = builder.CreateNode();
+				noWalletNode.CreateWallet = false;
+				noWalletNode.Start();
 				node.Start();
 				var rpc = node.CreateRPCClient();
-				var creds = RPCCredentialString.Parse(rpc.CredentialString.ToString());
-				creds.Server = rpc.Address.AbsoluteUri;
-				creds.WalletName = "w1";
-				rpc = new RPCClient(creds, Network.RegTest);
-				rpc.SendCommandAsync(RPCOperations.getwalletinfo).GetAwaiter().GetResult().ThrowIfError();
-				Assert.NotNull(rpc.GetBalance());
+				var w1 = rpc.CreateWallet("w1");
+				w1.SendCommandAsync(RPCOperations.getwalletinfo).GetAwaiter().GetResult().ThrowIfError();
+				Assert.NotNull(w1.GetBalance());
 				Assert.NotNull(rpc.GetBestBlockHash());
-				var block = rpc.GetBlock(rpc.Generate(1)[0]);
+				var address = w1.GetNewAddress();
+				var blocks = rpc.GenerateToAddress(1, address);
+
+				var block = rpc.GetBlock(blocks[0]);
 
 				rpc = rpc.PrepareBatch();
-				var b = rpc.GetBalanceAsync();
+				var w1b = rpc.SetWalletContext("w1");
+				var b = w1b.GetBalanceAsync();
 				var b2 = rpc.GetBestBlockHashAsync();
-				var a = rpc.SendCommandAsync(RPCOperations.gettransaction, block.Transactions.First().GetHash().ToString());
+				var a = w1b.SendCommandAsync(RPCOperations.gettransaction, block.Transactions.First().GetHash().ToString());
 				rpc.SendBatch();
 				b.GetAwaiter().GetResult();
 				b2.GetAwaiter().GetResult();
 				a.GetAwaiter().GetResult();
+
+				var noWalletRPC = noWalletNode.CreateRPCClient();
+				Assert.Throws<RPCException>(() => noWalletRPC.GetNewAddress());
+				noWalletRPC.CreateWallet("");
+				noWalletRPC.GetNewAddress();
 			}
 		}
 
@@ -155,7 +162,7 @@ namespace NBitcoin.Tests
 				var rpc = node.CreateRPCClient();
 				builder.StartAll();
 				node.Generate(101);
-				var txid = rpc.SendToAddress(new Key().PubKey.GetAddress(ScriptPubKeyType.Legacy, rpc.Network), Money.Coins(1.0m), "hello", "world");
+				var txid = rpc.SendToAddress(new Key().PubKey.GetAddress(ScriptPubKeyType.Legacy, rpc.Network), Money.Coins(1.0m));
 				var ids = rpc.GetRawMempool();
 				Assert.Single(ids);
 				Assert.Equal(txid, ids[0]);
@@ -187,10 +194,79 @@ namespace NBitcoin.Tests
 				builder.StartAll();
 				node.Generate(101);
 
-				var txid = rpc.SendToAddress(new Key().PubKey.GetAddress(ScriptPubKeyType.Legacy, rpc.Network), Money.Coins(1.0m), "hello", "world");
+				var txid = rpc.SendToAddress(new Key().PubKey.GetAddress(ScriptPubKeyType.Legacy, rpc.Network), Money.Coins(1.0m), new SendToAddressParameters() { Comment = "hello", CommentTo = "world" });
 				var memPoolInfo = rpc.GetMemPool();
 				Assert.NotNull(memPoolInfo);
 				Assert.Equal(1, memPoolInfo.Size);
+
+
+				foreach (var param in new[]
+				{
+					(ConfTarget : (int?)5, FeeRate: null as FeeRate, EstimateMode: (EstimateSmartFeeMode?)null),
+					(ConfTarget : (int?)null, FeeRate: new FeeRate(5.0m), EstimateMode: (EstimateSmartFeeMode?)null),
+					(ConfTarget : (int?)null, FeeRate: null as FeeRate, EstimateMode: (EstimateSmartFeeMode?)EstimateSmartFeeMode.Conservative),
+				})
+				{
+					rpc.SendToAddress(new Key().PubKey.GetAddress(ScriptPubKeyType.Legacy, rpc.Network), Money.Coins(1.0m),
+						new SendToAddressParameters()
+						{
+							Comment = "hello",
+							CommentTo = "world",
+							ConfTarget = param.ConfTarget,
+							EstimateMode = param.EstimateMode,
+							Replaceable = true,
+							SubstractFeeFromAmount = true,
+							FeeRate = param.FeeRate
+						});
+				}
+			}
+		}
+
+		[Fact]
+		public void CanSaveMemPool()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var node = builder.CreateNode();
+				var rpc = node.CreateRPCClient();
+				builder.StartAll();
+				node.Generate(101);
+
+				var mempoolFilePath = Path.Combine(node.Folder, "data", "regtest", "mempool.dat");
+				File.Delete(mempoolFilePath);
+				Assert.False(File.Exists(mempoolFilePath));
+				rpc.SendToAddress(new Key().PubKey.GetAddress(ScriptPubKeyType.Legacy, rpc.Network), Money.Coins(1.0m), new SendToAddressParameters() { Comment = "hello", CommentTo = "world" });
+				rpc.SaveMempool();
+				Assert.True(File.Exists(mempoolFilePath));
+			}
+		}
+
+		[Fact]
+		public async Task RPCBatchingCanFallbackIfAccessForbidden()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var node = builder.CreateNode();
+				node.CookieAuth = false;
+				node.ConfigParameters.Add("rpcwhitelist", $"{node.RPCCredentials.UserName}:getnetworkinfo,getblock,getblockhash");
+				builder.StartAll();
+
+				var rpc = node.CreateRPCClient();
+				var orig = rpc;
+				rpc.AllowBatchFallback = true;
+				rpc = rpc.PrepareBatch();
+				// Should be denied
+				var sending = rpc.SendToAddressAsync(new Key().PubKey.GetAddress(ScriptPubKeyType.Legacy, rpc.Network), Money.Coins(1.0m), new SendToAddressParameters() { Comment = "hello", CommentTo = "world" });
+				// Should give network info
+				var gettingNetworkInfo = rpc.SendCommandAsync(RPCOperations.getnetworkinfo);
+				await rpc.SendBatchAsync();
+
+				await Assert.ThrowsAsync<HttpRequestException>(async () => await sending);
+				var resp = await gettingNetworkInfo;
+				// Should not throw
+				resp.ThrowIfError();
+				orig.AllowBatchFallback = false;
+				await orig.ScanRPCCapabilitiesAsync();
 			}
 		}
 
@@ -264,7 +340,7 @@ namespace NBitcoin.Tests
 				var funding = rpc.GetRawTransaction(txid);
 				var coin = funding.Outputs.AsCoins().Single(o => o.ScriptPubKey == dest.ScriptPubKey);
 
-				var result = rpc.StartScanTxoutSet(new ScanTxoutSetObject(ScanTxoutDescriptor.Addr(dest)));
+				var result = rpc.StartScanTxoutSet(new ScanTxoutSetParameters(OutputDescriptor.NewAddr(dest, builder.Network)));
 
 				Assert.Equal(101, result.SearchedItems);
 				Assert.True(result.Success);
@@ -275,9 +351,7 @@ namespace NBitcoin.Tests
 				Assert.Null(rpc.GetStatusScanTxoutSet());
 
 				rpc.Generate(1);
-
-				result = rpc.StartScanTxoutSet(new ScanTxoutSetObject(ScanTxoutDescriptor.Addr(dest)));
-
+				result = rpc.StartScanTxoutSet(new ScanTxoutSetParameters(OutputDescriptor.NewAddr(dest, builder.Network)));
 				Assert.True(result.SearchedItems > 100);
 				Assert.True(result.Success);
 				Assert.Single(result.Outputs);
@@ -286,6 +360,21 @@ namespace NBitcoin.Tests
 
 				Assert.False(rpc.AbortScanTxoutSet());
 				Assert.Null(rpc.GetStatusScanTxoutSet());
+
+
+				var extkey = new ExtKey().GetWif(builder.Network);
+
+				var outputDesc = OutputDescriptor.NewPKH(PubKeyProvider.NewHD(extkey.Neuter(), new KeyPath("0/0"), PubKeyProvider.DeriveType.UNHARDENED), builder.Network);
+				foreach (var item in new[]
+				{
+					(Begin: (int?)null, End: (int?)500, SearchedItem: 500),
+					(Begin: (int?)500, End: (int?)1500, SearchedItem: 1000),
+					(Begin: (int?)null, End: (int?)null, SearchedItem: 1000),
+				})
+				{
+					result = rpc.StartScanTxoutSet(new ScanTxoutSetParameters(outputDesc, item.Begin, item.End));
+					Assert.True(result.Success);
+				}
 			}
 		}
 
@@ -341,7 +430,7 @@ namespace NBitcoin.Tests
 				var key = new Key();
 				var address = key.PubKey.GetAddress(ScriptPubKeyType.Legacy, rpc.Network);
 
-				var txid = rpc.SendToAddress(address, Money.Coins(2), null, null, false, true);
+				var txid = rpc.SendToAddress(address, Money.Coins(2), new SendToAddressParameters() { Replaceable = true });
 				var txbumpid = rpc.BumpFee(txid);
 				var blocks = rpc.Generate(1);
 
@@ -363,11 +452,6 @@ namespace NBitcoin.Tests
 
 				Assert.Equal(builder.Network, response.Chain);
 				Assert.Equal(builder.Network.GetGenesis().GetHash(), response.BestBlockHash);
-				Assert.Contains(response.Bip9SoftForks, x => x.Name == "segwit");
-				Assert.Contains(response.Bip9SoftForks, x => x.Name == "csv");
-				Assert.Contains(response.SoftForks, x => x.Bip == "bip34");
-				Assert.Contains(response.SoftForks, x => x.Bip == "bip65");
-				Assert.Contains(response.SoftForks, x => x.Bip == "bip66");
 			}
 		}
 
@@ -423,6 +507,24 @@ namespace NBitcoin.Tests
 		}
 
 		[Fact]
+		public void CanGetStatsFromRPC()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var rpc = builder.CreateNode().CreateRPCClient();
+				builder.StartAll();
+				var blockHashes = rpc.Generate(1);
+				var stats = rpc.GetBlockStats(blockHashes[0]);
+
+				Assert.NotNull(stats);
+				Assert.Equal(2, stats.UTXOIncrease);
+				Assert.Equal(2, stats.Outs);
+				Assert.Equal(1, stats.Txs);
+				Assert.Equal(blockHashes[0], stats.BlockHash);
+			}
+		}
+
+		[Fact]
 		public async Task CanGetTxoutSetInfoAsync()
 		{
 			using (var builder = NodeBuilderEx.Create())
@@ -463,7 +565,8 @@ namespace NBitcoin.Tests
 				Assert.Equal(getTxOutResponse.Confirmations, blocksToGenerate);
 				Assert.Equal(Money.Coins(50), getTxOutResponse.TxOut.Value);
 				Assert.NotNull(getTxOutResponse.TxOut.ScriptPubKey);
-				Assert.True(getTxOutResponse.ScriptPubKeyType == "pubkey" || getTxOutResponse.ScriptPubKeyType == "scripthash");
+				string scriptPubKeyType = getTxOutResponse.ScriptPubKeyType;
+				Assert.True(scriptPubKeyType == "pubkey" || scriptPubKeyType == "scripthash" || scriptPubKeyType == "witness_v0_keyhash");
 				Assert.True(getTxOutResponse.IsCoinBase);
 
 				// 2. Spend the first coin
@@ -494,7 +597,7 @@ namespace NBitcoin.Tests
 				Assert.Equal(0, getTxOutResponse.Confirmations);
 				Assert.Equal(Money.Coins(49), getTxOutResponse.TxOut.Value);
 				Assert.NotNull(getTxOutResponse.TxOut.ScriptPubKey);
-				Assert.Equal("pubkeyhash", getTxOutResponse.ScriptPubKeyType);
+				Assert.Equal("witness_v0_keyhash", scriptPubKeyType);
 				Assert.False(getTxOutResponse.IsCoinBase);
 			}
 		}
@@ -585,6 +688,77 @@ namespace NBitcoin.Tests
 		}
 
 		[Fact]
+		public void CanSendLowValueTransactionFromRPC()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var rpc = builder.CreateNode().CreateRPCClient();
+				builder.StartAll();
+				rpc.Generate(101);
+				var receiver = new Key();
+				var receiverAddress = receiver.PubKey.WitHash.GetAddress(builder.Network);
+				var txid = rpc.SendToAddress(receiverAddress, Money.Satoshis(1000));
+				var tx = rpc.GetRawTransaction(txid);
+				var coin = tx.Outputs.AsCoins().Where(c => c.ScriptPubKey == receiverAddress.ScriptPubKey);
+				var txBuilder = builder.Network.CreateTransactionBuilder();
+				txBuilder.AddCoins(coin);
+				txBuilder.AddKeys(receiver);
+				txBuilder.Send(new Key(), Money.Satoshis(600));
+				txBuilder.SetChange(new Key().PubKey.WitHash);
+				// The dust should be 294, so should have 2 outputs
+				txBuilder.SendFees(Money.Satoshis(400 - 294));
+				var signed = txBuilder.BuildTransaction(true);
+				Assert.Equal(2, signed.Outputs.Count);
+				Assert.NotNull(rpc.SendRawTransaction(tx));
+			}
+		}
+		[Fact]
+		public void CanCalculateDustCorrectly()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var rpc = builder.CreateNode().CreateRPCClient();
+				builder.StartAll();
+				rpc.Generate(101);
+				var receiver = new Key();
+				var receiverAddress = receiver.PubKey.WitHash.GetAddress(builder.Network);
+				var owned = Money.Satoshis(10000);
+				var txid = rpc.SendToAddress(receiverAddress, owned);
+				var tx = rpc.GetRawTransaction(txid);
+				var coin = tx.Outputs.AsCoins().Where(c => c.ScriptPubKey == receiverAddress.ScriptPubKey).FirstOrDefault();
+				foreach (var scriptPubKeyType in Enum.GetValues(typeof(ScriptPubKeyType)).OfType<ScriptPubKeyType>())
+				{
+#if !HAS_SPAN
+#pragma warning disable CS0618
+					if (scriptPubKeyType == ScriptPubKeyType.TaprootBIP86)
+						continue;
+#pragma warning restore CS0618
+#endif
+					Transaction paid = builder.Network.CreateTransaction();
+					paid.Inputs.Add(coin.Outpoint);
+					var dest = new Key().GetAddress(scriptPubKeyType, builder.Network);
+					var txout = builder.Network.Consensus.ConsensusFactory.CreateTxOut();
+					txout.ScriptPubKey = dest.ScriptPubKey;
+					var dustThreshold = txout.GetDustThreshold();
+					var sent = dustThreshold;
+					var fee = Money.Satoshis(300);
+					paid.Outputs.Add(sent, dest);
+					paid.Outputs.Add(owned - sent - fee, receiverAddress);
+					var txBuilder = builder.Network.CreateTransactionBuilder();
+					txBuilder.AddKeys(receiver);
+					txBuilder.AddCoins(coin);
+					txBuilder.SignTransactionInPlace(paid);
+					var result = rpc.TestMempoolAccept(paid);
+					Assert.Empty(result.RejectReason);
+					Assert.True(result.IsAllowed);
+					paid.Outputs[0].Value -= Money.Satoshis(1.0m);
+					result = rpc.TestMempoolAccept(paid);
+					Assert.Equal("dust", result.RejectReason);
+				}
+			}
+		}
+
+		[Fact]
 		public void CanImportMultiAddresses()
 		{
 			// Test cases borrowed from: https://github.com/bitcoin/bitcoin/blob/master/test/functional/wallet_importmulti.py
@@ -622,12 +796,26 @@ namespace NBitcoin.Tests
 				{
 					new ImportMultiAddress
 					{
-						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject (key.ScriptPubKey),
+						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject (key.GetScriptPubKey(ScriptPubKeyType.Legacy)),
 						Internal = true
 					}
 				};
 
 				rpc.ImportMulti(multiAddresses.ToArray(), false);
+				#endregion
+
+				#region ScriptPubKey + internal  + label
+				key = new Key();
+				multiAddresses = new List<ImportMultiAddress>
+				{
+					new ImportMultiAddress
+					{
+						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject(key.GetScriptPubKey(ScriptPubKeyType.Legacy)),
+						Internal = true,
+						Label = "Unsuccessful labelling for internal addresses"
+					}
+				};
+				Assert.Throws<RPCException>(() => rpc.ImportMulti(multiAddresses.ToArray(), false));
 				#endregion
 
 				#region ScriptPubKey + !internal
@@ -636,7 +824,7 @@ namespace NBitcoin.Tests
 				{
 					new ImportMultiAddress
 					{
-						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject { ScriptPubKey = key.ScriptPubKey },
+						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject { ScriptPubKey = key.GetScriptPubKey(ScriptPubKeyType.Legacy)},
 					}
 				};
 
@@ -663,7 +851,7 @@ namespace NBitcoin.Tests
 				{
 					new ImportMultiAddress
 					{
-						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject { ScriptPubKey = key.ScriptPubKey },
+						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject { ScriptPubKey = key.GetScriptPubKey(ScriptPubKeyType.Legacy)},
 						PubKeys = new[] { key.PubKey },
 						Internal = true
 					}
@@ -672,13 +860,26 @@ namespace NBitcoin.Tests
 				rpc.ImportMulti(multiAddresses.ToArray(), false);
 				#endregion
 
+				#region Nonstandard scriptPubKey + Public key + !internal
+				key = new Key();
+				var nonStandardSpk = Script.FromHex(key.GetScriptPubKey(ScriptPubKeyType.Legacy).ToHex() + new Script(OpcodeType.OP_NOP).ToHex());
+				multiAddresses = new List<ImportMultiAddress>
+				{
+					new ImportMultiAddress
+					{
+						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject(nonStandardSpk),
+					}
+				};
+				Assert.Throws<RPCException>(() => rpc.ImportMulti(multiAddresses.ToArray(), false));
+				#endregion
+
 				#region ScriptPubKey + Public key + !internal
 				key = new Key();
 				multiAddresses = new List<ImportMultiAddress>
 				{
 					new ImportMultiAddress
 					{
-						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject { ScriptPubKey = key.ScriptPubKey },
+						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject { ScriptPubKey = key.GetScriptPubKey(ScriptPubKeyType.Legacy)},
 						PubKeys = new [] { key.PubKey }
 					}
 				};
@@ -735,7 +936,7 @@ namespace NBitcoin.Tests
 				{
 					new ImportMultiAddress
 					{
-						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject { ScriptPubKey = key.ScriptPubKey },
+						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject { ScriptPubKey = key.GetScriptPubKey(ScriptPubKeyType.Legacy)},
 						Keys = new [] { key.GetWif(network) },
 						Internal = true
 					}
@@ -750,7 +951,7 @@ namespace NBitcoin.Tests
 				{
 					new ImportMultiAddress
 					{
-						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject { ScriptPubKey = key.ScriptPubKey },
+						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject { ScriptPubKey = key.GetScriptPubKey(ScriptPubKeyType.Legacy)},
 						Keys = new [] { key.GetWif(network) }
 					}
 				};
@@ -794,7 +995,7 @@ namespace NBitcoin.Tests
 				{
 					new ImportMultiAddress
 					{
-						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject { ScriptPubKey = key.ScriptPubKey },
+						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject { ScriptPubKey = key.GetScriptPubKey(ScriptPubKeyType.Legacy) },
 						PubKeys = new [] { new Key().PubKey },
 						Internal = true
 					}
@@ -823,7 +1024,7 @@ namespace NBitcoin.Tests
 				{
 					new ImportMultiAddress
 					{
-						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject { ScriptPubKey = key.ScriptPubKey },
+						ScriptPubKey = new ImportMultiAddress.ScriptPubKeyObject { ScriptPubKey = key.GetScriptPubKey(ScriptPubKeyType.Legacy)},
 						Keys = new [] { new Key().GetWif(network) },
 						Internal = true
 					}
@@ -839,6 +1040,95 @@ namespace NBitcoin.Tests
 				#region restart nodes to check for proper serialization/deserialization of watch only address
 				//TODO
 				#endregion
+
+				#region Test importing of a P2SH-P2WPKH address via descriptor + private key
+				key = new Key();
+				var p2shP2wpkhLabel = "Successful P2SH-P2wPKH descriptor import";
+				multiAddresses = new List<ImportMultiAddress>
+				{
+					new ImportMultiAddress
+					{
+						Desc = OutputDescriptor.Parse($"sh(wpkh({key.PubKey}))", Network.RegTest),
+						Label = p2shP2wpkhLabel,
+						Keys = new [] { new BitcoinSecret(key, rpc.Network)},
+					}
+				};
+				rpc.ImportMulti(multiAddresses.ToArray(), false);
+				#endregion
+
+				#region Test ranged descriptor fails if range is not specified
+
+				var xpriv =
+					"tprv8ZgxMBicQKsPeuVhWwi6wuMQGfPKi9Li5GtX35jVNknACgqe3CY4g5xgkfDDJcmtF7o1QnxWDRYw4H5P26PXq7sbcUkEqeR4fg3Kxp2tigg";
+				var addresses = new List<string>() { "2N7yv4p8G8yEaPddJxY41kPihnWvs39qCMf", "2MsHxyb2JS3pAySeNUsJ7mNnurtpeenDzLA" }; // hdkeypath=m/0'/0'/0' and 1'a
+				addresses.AddRange(new[]
+				{
+					"bcrt1qrd3n235cj2czsfmsuvqqpr3lu6lg0ju7scl8gn", "bcrt1qfqeppuvj0ww98r6qghmdkj70tv8qpchehegrg8"
+				}); // wpkh subscripts corresponding to the above addresses
+
+				// keyRepo to store xpriv
+				var keyRepo = new FlatSigningRepository();
+				var desc = OutputDescriptor.Parse($"sh(wpkh({xpriv}/0'/0'/*'))", Network.RegTest, false, keyRepo);
+				multiAddresses = new List<ImportMultiAddress>
+				{
+					new ImportMultiAddress
+					{
+						Desc = desc,
+					}
+				};
+				// Must fail without range
+				Assert.Throws<RPCException>(() => rpc.ImportMulti(multiAddresses.ToArray(), false));
+
+				// Successful case
+				multiAddresses = new List<ImportMultiAddress>
+				{
+					new ImportMultiAddress
+					{
+						Desc = desc,
+						Range = 1
+					}
+				};
+				rpc.ImportMulti(multiAddresses.ToArray(), false, keyRepo);
+				foreach (var addr in addresses)
+				{
+					TestAddress(rpc, addr, solvable: true, isMine: true);
+				}
+
+				#endregion
+				#region Test importing a descriptor containing a WIF private key
+
+				var wifPriv = "cTe1f5rdT8A8DFgVWTjyPwACsDPJM9ff4QngFxUixCSvvbg1x6sh";
+				var address = "2MuhcG52uHPknxDgmGPsV18jSHFBnnRgjPg";
+				desc = OutputDescriptor.Parse($"sh(wpkh({wifPriv}))", Network.TestNet);
+				multiAddresses = new List<ImportMultiAddress>
+				{
+					new ImportMultiAddress
+					{
+						Desc = desc,
+						Keys = new [] {new BitcoinSecret(wifPriv, Network.TestNet) }
+					}
+				};
+				rpc.ImportMulti(multiAddresses.ToArray(), false);
+				TestAddress(rpc, address, true, true);
+
+				#endregion
+
+			}
+		}
+
+		/// <summary>
+		/// https://github.com/bitcoin/bitcoin/blob/db26eeba71fb07caae8c4c8a59a80c4ebe0b5797/test/functional/test_framework/wallet_util.py#L111
+		/// </summary>
+		private void TestAddress(RPCClient rpc, string address, bool? solvable = null, bool? isMine = null)
+		{
+			var addrInfo = rpc.GetAddressInfo(BitcoinAddress.Create(address, rpc.Network));
+			if (solvable != null)
+			{
+				Assert.Equal(solvable, addrInfo.Solvable);
+			}
+			if (isMine != null)
+			{
+				Assert.Equal(isMine, addrInfo.IsMine);
 			}
 		}
 
@@ -906,20 +1196,6 @@ namespace NBitcoin.Tests
 		}
 
 		[Fact]
-		public void RawTransactionIsConformsToRPC()
-		{
-			using (var builder = NodeBuilderEx.Create())
-			{
-				var rpc = builder.CreateNode().CreateRPCClient();
-				builder.StartAll();
-				var tx = Network.TestNet.GetGenesis().Transactions[0];
-
-				var tx2 = rpc.DecodeRawTransaction(tx.ToBytes());
-				AssertJsonEquals(tx.ToString(RawFormat.Satoshi), tx2.ToString(RawFormat.Satoshi));
-			}
-		}
-
-		[Fact]
 		public void InvalidateBlockToRPC()
 		{
 			using (var builder = NodeBuilderEx.Create())
@@ -942,6 +1218,23 @@ namespace NBitcoin.Tests
 		}
 
 
+		[Fact]
+		public async Task CanBatchRequestPartiallySucceed()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var nodeA = builder.CreateNode();
+				builder.StartAll();
+				var rpc = nodeA.CreateRPCClient();
+				var batch = rpc.PrepareBatch();
+				var generating = batch.GenerateAsync(10);
+				var garbaging = batch.SendCommandAsync("ofwifwu");
+				await batch.SendBatchAsync();
+				await generating;
+				var err = await Assert.ThrowsAsync<RPCException>(async () => await garbaging);
+				Assert.Equal(RPCErrorCode.RPC_METHOD_NOT_FOUND, err.RPCCode);
+			}
+		}
 		[Fact]
 		public void CanUseBatchedRequests()
 		{
@@ -1002,6 +1295,7 @@ namespace NBitcoin.Tests
 			using (var builder = NodeBuilderEx.Create())
 			{
 				var nodeA = builder.CreateNode();
+				nodeA.WhiteBind = true;
 				builder.StartAll();
 				var rpc = nodeA.CreateRPCClient();
 				using (var node = nodeA.CreateNodeClient())
@@ -1009,6 +1303,7 @@ namespace NBitcoin.Tests
 					node.VersionHandshake();
 					var peers = rpc.GetPeersInfo();
 					Assert.NotEmpty(peers);
+					Assert.NotEmpty(peers[0].Permissions);
 				}
 			}
 		}
@@ -1030,14 +1325,14 @@ namespace NBitcoin.Tests
 				{
 					amount = amount / 2 - fee;
 					var address = rpc.GetNewAddress();
-					var txid = rpc.SendToAddress(address, amount, "");
+					var txid = rpc.SendToAddress(address, amount);
 					txs.Add(txid);
 				}
 				var mempoolEntry = rpc.GetMempoolEntry(txs[3]);
 				Assert.Equal(4, mempoolEntry.AncestorCount);
 				Assert.Equal(7, mempoolEntry.DescendantCount);
-				Assert.Equal(1, (int)mempoolEntry.SpentBy.Length);
-				Assert.Equal(1, (int)mempoolEntry.Depends.Length);
+				Assert.Single(mempoolEntry.SpentBy);
+				Assert.Single(mempoolEntry.Depends);
 
 				// Here we spend the change of the second transaction
 				var funding = rpc.GetRawTransaction(txs[1]);
@@ -1060,20 +1355,177 @@ namespace NBitcoin.Tests
 				mempoolEntry = rpc.GetMempoolEntry(txs[1]);
 				Assert.Equal(2, mempoolEntry.AncestorCount);
 				Assert.Equal(10, mempoolEntry.DescendantCount);
-				Assert.Equal(2, (int)mempoolEntry.SpentBy.Length);
-				Assert.Equal(1, (int)mempoolEntry.Depends.Length);
+				Assert.Equal(2, mempoolEntry.SpentBy.Length);
+				Assert.Single(mempoolEntry.Depends);
 
 				mempoolEntry = rpc.GetMempoolEntry(txx);
 				Assert.Equal(3, mempoolEntry.AncestorCount);
 				Assert.Equal(1, mempoolEntry.DescendantCount);
-				Assert.Equal(0, (int)mempoolEntry.SpentBy.Length);
-				Assert.Equal(1, (int)mempoolEntry.Depends.Length);
+				Assert.Empty(mempoolEntry.SpentBy);
+				Assert.Single(mempoolEntry.Depends);
 
 				mempoolEntry = rpc.GetMempoolEntry(txs[3]);
 				Assert.Equal(4, mempoolEntry.AncestorCount);
 				Assert.Equal(7, mempoolEntry.DescendantCount);
-				Assert.Equal(1, (int)mempoolEntry.SpentBy.Length);
-				Assert.Equal(1, (int)mempoolEntry.Depends.Length);
+				Assert.Single(mempoolEntry.SpentBy);
+				Assert.Single(mempoolEntry.Depends);
+			}
+		}
+
+		[Fact]
+		public void GetMemPoolEntryThrows()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var node = builder.CreateNode();
+				var rpc = node.CreateRPCClient();
+				builder.StartAll();
+
+				Assert.Throws<RPCException>(() => rpc.GetMempoolEntry(uint256.One, throwIfNotFound: true));
+			}
+		}
+
+		[Fact]
+		public void GetMemPoolEntryDoesntThrow()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var node = builder.CreateNode();
+				var rpc = node.CreateRPCClient();
+				builder.StartAll();
+
+				var mempoolEntry = rpc.GetMempoolEntry(uint256.One, throwIfNotFound: false);
+				Assert.Null(mempoolEntry);
+			}
+		}
+
+
+		class HardcodedResponseClientHandler : HttpMessageHandler
+		{
+			private readonly string _content;
+
+			public HardcodedResponseClientHandler(string content)
+			{
+				_content = content;
+			}
+
+			protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+			{
+				return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+				{
+					Content = new StringContent(_content)
+				});
+			}
+		}
+
+		[Fact]
+		public void MempoolInfoWithHistogram()
+		{
+			using var httpClient = new HttpClient(new HardcodedResponseClientHandler(
+				"{" +
+				"	\"result\": {" +
+				"	  \"loaded\": true," +
+				"	  \"size\": 2184," +
+				"	  \"bytes\": 4529888," +
+				"	  \"usage\": 17260240," +
+				"	  \"maxmempool\": 300000000," +
+				"	  \"mempoolminfee\": 0.00001000," +
+				"	  \"minrelaytxfee\": 0.00001000," +
+				"	  \"fee_histogram\": {" +
+				"	    \"1\": {" +
+				"	      \"sizes\": 2184356," +
+				"	      \"count\": 400," +
+				"	      \"fees\": 2277259," +
+				"	      \"from_feerate\": 1," +
+				"	      \"to_feerate\": 2" +
+				"	    }," +
+				"	    \"200\": {" +
+				"	      \"sizes\": 17065," +
+				"	      \"count\": 67," +
+				"	      \"fees\": 3841448," +
+				"	      \"from_feerate\": 200," +
+				"	      \"to_feerate\": 250" +
+				"	    }," +
+				"	    \"total_fees\": 61420473" +
+				"	  }" +
+				"	}" +
+				"}"
+			));
+			var rpcClient = new RPCClient(Network.Main);
+			rpcClient.HttpClient = httpClient;
+			var mempool = rpcClient.GetMemPool();
+			var histogram = mempool.Histogram;
+
+			Assert.Equal(2, histogram.Count());
+			Assert.Equal(1, histogram.First().Group);
+			Assert.Equal(200, histogram.Last().Group);
+		}
+
+		[Fact]
+		public void DoubleSpendThrows()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var node = builder.CreateNode();
+				var rpc = node.CreateRPCClient();
+				builder.StartAll();
+				var network = node.Network;
+
+				var key = new Key();
+				var blockId = rpc.GenerateToAddress(1, key.PubKey.WitHash.GetAddress(network));
+				var block = rpc.GetBlock(blockId[0]);
+				var coinBaseTx = block.Transactions[0];
+
+				var tx = Transaction.Create(network);
+				tx.Inputs.Add(coinBaseTx, 0);
+				tx.Outputs.Add(Money.Coins(49.9999m), new Key().PubKey.WitHash.GetAddress(network));
+				tx.Sign(key.GetBitcoinSecret(network), coinBaseTx.Outputs.AsCoins().First());
+				var valid = tx.Check();
+
+				var doubleSpend = Transaction.Create(network);
+				doubleSpend.Inputs.Add(coinBaseTx, 0);
+				doubleSpend.Outputs.Add(Money.Coins(49.998m), new Key().PubKey.WitHash.GetAddress(network));
+				doubleSpend.Sign(key.GetBitcoinSecret(network), coinBaseTx.Outputs.AsCoins().First());
+				valid = doubleSpend.Check();
+
+				rpc.Generate(101);
+
+				var txId = rpc.SendRawTransaction(tx);
+				Assert.Throws<RPCException>(() => rpc.SendRawTransaction(doubleSpend));
+			}
+		}
+
+		[Fact]
+		public async Task GetBlockFilterAsync()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var node = builder.CreateNode();
+				node.ConfigParameters.Add("blockfilterindex", "1");
+				var rpc = node.CreateRPCClient();
+				builder.StartAll();
+				node.Generate(101);
+
+				var prevFilterHeader = uint256.Zero;
+				for (var height = 0; height < 101; height++)
+				{
+					var block = rpc.GetBlock(height);
+					var blockHash = block.GetHash();
+					var blockFilter = rpc.GetBlockFilter(blockHash);
+					var sameFilter = await rpc.GetBlockFilterAsync(blockHash);
+					Assert.Equal(blockFilter.Header, sameFilter.Header);
+					Assert.Equal(blockFilter.Filter.ToString(), sameFilter.Filter.ToString());
+
+					Assert.Equal(blockFilter.Header, blockFilter.Filter.GetHeader(prevFilterHeader));
+
+					byte[] FilterKey(uint256 hash) => hash.ToBytes().SafeSubarray(0, 16);
+					var coinbaseTx = block.Transactions[0];
+					var minerScriptPubKey = coinbaseTx.Outputs[0].ScriptPubKey;
+					Assert.True(blockFilter.Filter.MatchAny(new[] { minerScriptPubKey.ToBytes() }, FilterKey(blockHash)));
+					Assert.False(blockFilter.Filter.MatchAny(new[] { RandomUtils.GetBytes(20) }, FilterKey(blockHash)));
+
+					prevFilterHeader = blockFilter.Header;
+				}
 			}
 		}
 
@@ -1094,10 +1546,10 @@ namespace NBitcoin.Tests
 				tx.Inputs.Add(coin.OutPoint);
 				tx.Outputs.Add(tx.Outputs.CreateNewTxOut(coin.Amount - fee, new Key().PubKey.Hash.ScriptPubKey));
 
-				var result = rpc.TestMempoolAccept(tx);
+				var result = rpc.TestMempoolAccept(tx, new TestMempoolParameters() { MaxFeeRate = new FeeRate(1.0m) });
 				Assert.False(result.IsAllowed);
 				Assert.Equal(Protocol.RejectCode.INVALID, result.RejectCode);
-				Assert.Equal("mandatory-script-verify-flag-failed (Operation not valid with the current stack size)", result.RejectReason);
+				Assert.Equal("non-mandatory-script-verify-flag (Witness program hash mismatch)", result.RejectReason);
 
 				var signedTx = rpc.SignRawTransactionWithWallet(new SignRawTransactionRequest()
 				{
@@ -1106,7 +1558,7 @@ namespace NBitcoin.Tests
 
 				result = rpc.TestMempoolAccept(signedTx.SignedTransaction);
 				Assert.True(result.IsAllowed);
-				Assert.Equal((Protocol.RejectCode)0, result.RejectCode);
+				Assert.Equal(Protocol.RejectCode.INVALID, result.RejectCode);
 				Assert.Equal(string.Empty, result.RejectReason);
 			}
 		}
@@ -1218,8 +1670,6 @@ namespace NBitcoin.Tests
 #endif
 		}
 
-
-
 		[Fact]
 		public void RPCSendRPCException()
 		{
@@ -1239,24 +1689,6 @@ namespace NBitcoin.Tests
 					{
 						Assert.False(true, "Should have thrown RPC_METHOD_NOT_FOUND");
 					}
-				}
-			}
-		}
-
-		void WaitAssert(Action act)
-		{
-			int totalTry = 30;
-			while (totalTry > 0)
-			{
-				try
-				{
-					act();
-					return;
-				}
-				catch (AssertActualExpectedException)
-				{
-					Thread.Sleep(100);
-					totalTry--;
 				}
 			}
 		}
@@ -1285,17 +1717,34 @@ namespace NBitcoin.Tests
 		}
 
 		[Fact]
-		public async Task CanGenerateBlocks()
+		public async Task CanQueryUptimeAsync()
 		{
 			using (var builder = NodeBuilderEx.Create())
 			{
+				var node = builder.CreateNode();
+				node.Start();
+				var rpc = node.CreateRPCClient();
+				var uptime1 = rpc.Uptime();
+				var uptime2 = await rpc.UptimeAsync();
+				Assert.Equal(uptime1.TotalSeconds, uptime2.TotalSeconds, 3);
+			}
+		}
+
+		[Theory]
+		[InlineData(RPCWalletType.Descriptors)]
+		[InlineData(RPCWalletType.Legacy)]
+		public async Task CanGenerateBlocks(RPCWalletType walletType)
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				builder.RPCWalletType = walletType;
 				var node = builder.CreateNode();
 				node.CookieAuth = true;
 				node.Start();
 				var rpc = node.CreateRPCClient();
 				var capabilities = await rpc.ScanRPCCapabilitiesAsync();
 
-				var address = new Key().PubKey.GetSegwitAddress(Network.RegTest);
+				var address = new Key().PubKey.GetAddress(ScriptPubKeyType.Segwit, Network.RegTest);
 				var blockHash1 = rpc.GenerateToAddress(1, address);
 				var block = rpc.GetBlock(blockHash1[0]);
 
@@ -1310,6 +1759,30 @@ namespace NBitcoin.Tests
 
 				var heigh = rpc.GetBlockCount();
 				Assert.Equal(3, heigh);
+			}
+		}
+
+		[Fact]
+		public async Task UpdatePSBTInRPCShouldIncludePreviousTX()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var node = builder.CreateNode();
+				node.Start();
+				var client = node.CreateRPCClient();
+				var address = await client.GetNewAddressAsync();
+				await client.GenerateToAddressAsync(102, address);
+				var coin = (await client.ListUnspentAsync())[0].AsCoin();
+				var txbuilder = builder.Network.CreateTransactionBuilder();
+				txbuilder.AddCoins(coin);
+				txbuilder.SetChange(await client.GetNewAddressAsync());
+				txbuilder.SendFees(Money.Satoshis(1000));
+				txbuilder.Send(new Key().PubKey.GetScriptPubKey(ScriptPubKeyType.Legacy), Money.Coins(1.0m));
+				var psbt = txbuilder.BuildPSBT(false);
+
+				var resp = await client.WalletProcessPSBTAsync(psbt, false);
+				Assert.NotNull(resp.PSBT.Inputs[0].NonWitnessUtxo);
+				Assert.NotNull(resp.PSBT.Inputs[0].WitnessUtxo);
 			}
 		}
 
@@ -1404,7 +1877,7 @@ namespace NBitcoin.Tests
 
 				var client = node.CreateRPCClient();
 
-				// ensure the wallet has whole kinds of coins ... 
+				// ensure the wallet has whole kinds of coins ...
 				var addr = client.GetNewAddress();
 				client.GenerateToAddress(101, addr);
 				addr = client.GetNewAddress(new GetNewAddressRequest() { AddressType = AddressType.Bech32 });
@@ -1412,7 +1885,7 @@ namespace NBitcoin.Tests
 				addr = client.GetNewAddress(new GetNewAddressRequest() { AddressType = AddressType.P2SHSegwit });
 				client.SendToAddress(addr, Money.Coins(15));
 				var tmpaddr = new Key();
-				client.GenerateToAddress(1, tmpaddr.PubKey.GetAddress(node.Network));
+				client.GenerateToAddress(1, tmpaddr.PubKey.GetAddress(ScriptPubKeyType.Legacy, node.Network));
 
 				// case 1: irrelevant psbt.
 				var keys = new Key[] { new Key(), new Key(), new Key() }.Select(k => k.GetWif(Network.RegTest)).ToArray();
@@ -1431,7 +1904,6 @@ namespace NBitcoin.Tests
 				tx = builder.Network.CreateTransaction();
 				tx.Outputs.Add(new TxOut(Money.Coins(45), kOut)); // This has to be big enough since the wallet must use whole kinds of address.
 				var fundTxResult = client.FundRawTransaction(tx);
-				Assert.Equal(3, fundTxResult.Transaction.Inputs.Count);
 				var psbtFinalized = PSBT.FromTransaction(fundTxResult.Transaction, builder.Network);
 				var result = client.WalletProcessPSBT(psbtFinalized, false);
 				Assert.False(result.PSBT.CanExtractTransaction());
@@ -1467,7 +1939,7 @@ namespace NBitcoin.Tests
 				result.PSBT.Finalize();
 
 				var txResult = result.PSBT.ExtractTransaction();
-				var acceptResult = client.TestMempoolAccept(txResult, true);
+				var acceptResult = client.TestMempoolAccept(txResult, new TestMempoolParameters() { MaxFeeRate = new FeeRate(10_000m) });
 				Assert.True(acceptResult.IsAllowed, acceptResult.RejectReason);
 			}
 		}
@@ -1477,11 +1949,13 @@ namespace NBitcoin.Tests
 		// 1. one user (David) do not use bitcoin core (only NBitcoin)
 		// 2. 4-of-4 instead of 2-of-3
 		// 3. In version 0.17, `importmulti` can not handle witness script so only p2sh are considered here. TODO: fix
-		[Fact]
-		public void ShouldPerformMultisigProcessingWithCore()
+		[Theory]
+		[InlineData("latest")]
+		public void ShouldPerformMultisigProcessingWithCore(string version)
 		{
-			using (var builder = NodeBuilderEx.Create())
+			using (var builder = NodeBuilderEx.Create(NodeDownloadData.Bitcoin.FromVersion(version)))
 			{
+				builder.RPCWalletType = RPCWalletType.Legacy;
 				var nodeAlice = builder.CreateNode();
 				var nodeBob = builder.CreateNode();
 				var nodeCarol = builder.CreateNode();
@@ -1559,7 +2033,7 @@ namespace NBitcoin.Tests
 				// Assert.Equal(Money.Coins(120), balance);
 				Assert.Equal(Money.Coins(40), balance);
 
-				var aSend = new Key().PubKey.GetAddress(nodeAlice.Network);
+				var aSend = new Key().GetAddress(ScriptPubKeyType.Legacy, nodeAlice.Network);
 				var outputs = new Dictionary<BitcoinAddress, Money>();
 				outputs.Add(aSend, Money.Coins(10));
 				var fundOptions = new FundRawTransactionOptions() { SubtractFeeFromOutputs = new int[] { 0 }, IncludeWatching = true };
@@ -1593,17 +2067,19 @@ namespace NBitcoin.Tests
 		}
 
 
-		[Fact]
+		[Theory]
+		[InlineData("latest")]
 		/// <summary>
 		/// For p2sh, p2wsh, p2sh-p2wsh, we must also test the case for `solvable` to the wallet.
 		/// For that, both script and the address must be imported by `importmulti`.
 		/// but importmulti can not handle witness script(in v0.17).
 		/// TODO: add test for solvable scripts.
 		/// </summary>
-		public void ShouldGetAddressInfo()
+		public void ShouldGetAddressInfo(string version)
 		{
-			using (var builder = NodeBuilderEx.Create())
+			using (var builder = NodeBuilderEx.Create(NodeDownloadData.Bitcoin.FromVersion(version)))
 			{
+				builder.RPCWalletType = RPCWalletType.Legacy;
 				var client = builder.CreateNode(true).CreateRPCClient();
 				var addrLegacy = client.GetNewAddress(new GetNewAddressRequest() { AddressType = AddressType.Legacy });
 				var addrBech32 = client.GetNewAddress(new GetNewAddressRequest() { AddressType = AddressType.Bech32 });
@@ -1623,6 +2099,86 @@ namespace NBitcoin.Tests
 			}
 		}
 
+		[Fact]
+		public void ShouldCreateLoadAndUnloadWallet()
+		{
+			using var builder = NodeBuilderEx.Create();
+			var node = builder.CreateNode(true);
+			var rpc = node.CreateRPCClient();
+
+			var wallet0 = rpc.CreateWallet("w0");
+			var address = wallet0.GetNewAddress();
+			wallet0.UnloadWallet();
+			Assert.Throws<RPCException>(() => wallet0.GetNewAddress());
+
+			wallet0 = rpc.LoadWallet("w0");
+			address = wallet0.GetNewAddress();
+			wallet0.UnloadWallet();
+			Assert.Throws<RPCException>(() => wallet0.GetNewAddress());
+
+			wallet0 = rpc.LoadWallet("w0", true);
+			node.Restart();
+			address = wallet0.GetNewAddress();
+			wallet0.UnloadWallet();
+
+			node.Restart();
+			address = wallet0.GetNewAddress();
+			wallet0.UnloadWallet(false);
+			node.Restart();
+			Assert.Throws<RPCException>(() => wallet0.GetNewAddress());
+		}
+
+		[Fact]
+		public async Task GetBlockVerboseTests()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var node = builder.CreateNode();
+				await node.StartAsync();
+				var cli = node.CreateRPCClient();
+
+				// case 1: genesis block
+				var verboseGenesis = await cli.GetBlockAsync(Network.RegTest.GenesisHash, GetBlockVerbosity.WithFullTx);
+				Assert.True(verboseGenesis.Block.ToBytes().SequenceEqual(Network.RegTest.GetGenesis().ToBytes()));
+				Assert.Equal(0, verboseGenesis.Height);
+				var height = await cli.GetBlockCountAsync();
+				Assert.Equal(height + 1, verboseGenesis.Confirmations);
+				Assert.Equal(285, verboseGenesis.StrippedSize);
+				Assert.Equal(285, verboseGenesis.Size);
+				Assert.Equal(1140, verboseGenesis.Weight);
+				Assert.Equal(0, verboseGenesis.Height);
+				Assert.Equal("00000001", verboseGenesis.VersionHex);
+				Assert.Equal(1, verboseGenesis.Block.Header.Version);
+				Assert.Equal(Network.RegTest.GenesisHash, verboseGenesis.Block.GetHash());
+				Assert.Equal(uint256.Parse("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"), verboseGenesis.Block.Transactions.First().GetHash());
+				Assert.Single(verboseGenesis.Block.Transactions);
+				Assert.Equal(verboseGenesis.MedianTime, verboseGenesis.Block.Header.BlockTime);
+				Assert.Equal(2u, verboseGenesis.Block.Header.Nonce);
+				Assert.Equal(new Target(0x207fffff), verboseGenesis.Block.Header.Bits);
+				Assert.Equal(4.656542373906925e-10, verboseGenesis.Difficulty);
+				Assert.Equal(uint256.Parse("0000000000000000000000000000000000000000000000000000000000000002"), verboseGenesis.ChainWork);
+
+				// NextBlockHash must be included iff the block is not on the tip.
+				Assert.Null(verboseGenesis.NextBlockHash);
+				var addr = await cli.GetNewAddressAsync();
+				await cli.GenerateToAddressAsync(1, addr);
+				verboseGenesis = await cli.GetBlockAsync(Network.RegTest.GenesisHash, GetBlockVerbosity.WithOnlyTxId);
+				Assert.NotNull(verboseGenesis.NextBlockHash);
+				Assert.Null(verboseGenesis.Block); // there will be no Block if we specify false to second argument.
+				Assert.NotNull(verboseGenesis.TxIds); // But txids are still there.
+				Assert.Single(verboseGenesis.TxIds);
+
+				// case 2: next block.
+				var secondBlockHash = await cli.GetBestBlockHashAsync();
+				var verboseBestBlock = await cli.GetBlockAsync(secondBlockHash, GetBlockVerbosity.WithOnlyTxId);
+				Assert.Equal(Network.RegTest.GenesisHash, verboseBestBlock.Header.HashPrevBlock);
+				Assert.Null(verboseBestBlock.NextBlockHash);
+
+				await cli.GenerateToAddressAsync(1, addr);
+				verboseBestBlock = await cli.GetBlockAsync(secondBlockHash, GetBlockVerbosity.WithOnlyTxId);
+				Assert.NotNull(verboseBestBlock.NextBlockHash);
+			}
+		}
 
 		private void AssertJsonEquals(string json1, string json2)
 		{

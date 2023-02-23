@@ -1,4 +1,5 @@
-﻿using System;
+﻿#nullable enable
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -26,30 +27,23 @@ namespace NBitcoin.Policy
 		/// <summary>
 		/// Safety check, if the FeeRate exceed this value, a policy error is raised
 		/// </summary>
-		public FeeRate MaxTxFee
+		public FeeRate? MaxTxFee
 		{
 			get;
 			set;
 		}
-		public FeeRate MinRelayTxFee
+		public FeeRate? MinRelayTxFee
 		{
 			get;
 			set;
 		}
-		public Money MinFee { get; set; }
+		public Money? MinFee { get; set; }
 
 		public ScriptVerify? ScriptVerify
 		{
 			get;
 			set;
 		}
-		/// <summary>
-		/// Check if the transaction is safe from malleability (default: false)
-		/// </summary>
-		public bool CheckMalleabilitySafe
-		{
-			get; set;
-		} = false;
 		public bool CheckFee
 		{
 			get;
@@ -67,30 +61,29 @@ namespace NBitcoin.Policy
 
 		public TransactionPolicyError[] Check(Transaction transaction, ICoin[] spentCoins)
 		{
-			if (transaction == null)
-				throw new ArgumentNullException(nameof(transaction));
-
-			spentCoins = spentCoins ?? new ICoin[0];
-
+			if (spentCoins == null)
+				throw new ArgumentNullException(nameof(spentCoins));
+			var validator = transaction.CreateValidator(spentCoins.ToArray());
+			if (ScriptVerify is NBitcoin.ScriptVerify v)
+				validator.ScriptVerify = v;
+			return Check(validator);
+		}
+		public TransactionPolicyError[] Check(TransactionValidator validator)
+		{
+			if (validator == null)
+				throw new ArgumentNullException(nameof(validator));
+			var transaction = validator.Transaction;
 			List<TransactionPolicyError> errors = new List<TransactionPolicyError>();
-
-
-
-			foreach (var input in transaction.Inputs.AsIndexedInputs())
+			foreach (var input in validator.Transaction.Inputs.AsIndexedInputs())
 			{
-				var coin = spentCoins.FirstOrDefault(s => s.Outpoint == input.PrevOut);
-				if (coin != null)
+				if (this.ScriptVerify is NBitcoin.ScriptVerify)
 				{
-					if (ScriptVerify != null)
+					ScriptError? error;
+					if (!VerifyScript(validator, (int)input.Index, out error) && error is ScriptError err)
 					{
-						ScriptError error;
-						if (!VerifyScript(input, coin.TxOut, ScriptVerify.Value, out error))
-						{
-							errors.Add(new ScriptPolicyError(input, error, ScriptVerify.Value, coin.TxOut.ScriptPubKey));
-						}
+						errors.Add(new ScriptPolicyError(input, err, validator.ScriptVerify, validator.SpentOutputs[input.Index].ScriptPubKey));
 					}
 				}
-
 				var txin = input.TxIn;
 				if (txin.ScriptSig.Length > MaxScriptSigLength)
 				{
@@ -103,16 +96,6 @@ namespace NBitcoin.Policy
 				if (!txin.ScriptSig.HasCanonicalPushes)
 				{
 					errors.Add(new InputPolicyError("All operation should be canonical push", input));
-				}
-			}
-
-			if (CheckMalleabilitySafe)
-			{
-				foreach (var input in transaction.Inputs.AsIndexedInputs())
-				{
-					var coin = spentCoins.FirstOrDefault(s => s.Outpoint == input.PrevOut);
-					if (coin != null && coin.GetHashVersion() != HashVersion.Witness)
-						errors.Add(new InputPolicyError("Malleable input detected", input));
 				}
 			}
 
@@ -132,7 +115,7 @@ namespace NBitcoin.Policy
 					errors.Add(new TransactionSizePolicyError(txSize, MaxTransactionSize.Value));
 			}
 
-			var fees = transaction.GetFee(spentCoins);
+			var fees = transaction.GetFee(validator.SpentOutputs);
 			if (fees != null)
 			{
 				var virtualSize = transaction.GetVirtualSize();
@@ -162,13 +145,13 @@ namespace NBitcoin.Policy
 					}
 				}
 			}
-			if (MinRelayTxFee != null)
+			if (CheckDust)
 			{
 				foreach (var output in transaction.Outputs)
 				{
 					var bytes = output.ScriptPubKey.ToBytes(true);
-					if (output.IsDust(MinRelayTxFee) && !IsOpReturn(bytes))
-						errors.Add(new DustPolicyError(output.Value, output.GetDustThreshold(MinRelayTxFee)));
+					if (output.IsDust() && !IsOpReturn(bytes))
+						errors.Add(new DustPolicyError(output.Value, output.GetDustThreshold()));
 				}
 			}
 			var opReturnCount = transaction.Outputs.Select(o => o.ScriptPubKey.ToBytes(true)).Count(b => IsOpReturn(b));
@@ -182,26 +165,34 @@ namespace NBitcoin.Policy
 			return bytes.Length > 0 && bytes[0] == (byte)OpcodeType.OP_RETURN;
 		}
 
-		private bool VerifyScript(IndexedTxIn input, TxOut spentOutput, ScriptVerify scriptVerify, out ScriptError error)
+		private bool VerifyScript(TransactionValidator validator, int inputIndex, out ScriptError? error)
 		{
 
 #if !NOCONSENSUSLIB
 			if (!UseConsensusLib)
 #endif
 			{
-				if (input.Transaction is IHasForkId)
-					scriptVerify |= NBitcoin.ScriptVerify.ForkId;
-				return input.VerifyScript(spentOutput, scriptVerify, out error);
+				var res = validator.ValidateInput(inputIndex);
+				if (res.Error is ScriptError err)
+				{
+					error = err;
+					return false;
+				}
+				error = null;
+				return true;
 			}
 #if !NOCONSENSUSLIB
 			else
 			{
-				if (input.Transaction is IHasForkId)
+				var scriptVerify = validator.ScriptVerify;
+				if (validator.Transaction is IHasForkId)
 					scriptVerify |= (NBitcoin.ScriptVerify)(1U << 16);
-				var ok = Script.VerifyScriptConsensus(spentOutput.ScriptPubKey, input.Transaction, input.Index, scriptVerify);
+				var ok = Script.VerifyScriptConsensus(validator.SpentOutputs[inputIndex].ScriptPubKey, validator.Transaction, (uint)inputIndex, scriptVerify);
 				if (!ok)
 				{
-					if (input.VerifyScript(spentOutput, scriptVerify, out error))
+					if (!validator.TryValidateInput(inputIndex, out var res) && res.Error is ScriptError err)
+						error = err;
+					else
 						error = ScriptError.UnknownError;
 					return false;
 				}
@@ -229,10 +220,10 @@ namespace NBitcoin.Policy
 #if !NOCONSENSUSLIB
 				UseConsensusLib = UseConsensusLib,
 #endif
-				CheckMalleabilitySafe = CheckMalleabilitySafe,
 				CheckScriptPubKey = CheckScriptPubKey,
 				CheckFee = CheckFee,
-				Strategy = Strategy
+				Strategy = Strategy,
+				CheckDust = CheckDust
 			};
 		}
 
@@ -244,6 +235,7 @@ namespace NBitcoin.Policy
 			get;
 			set;
 		}
+		public bool CheckDust { get; set; } = true;
 	}
 
 	public class StandardTransactionPolicyStrategy

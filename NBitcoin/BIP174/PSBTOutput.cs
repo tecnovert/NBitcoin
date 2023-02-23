@@ -1,4 +1,5 @@
-﻿using System;
+﻿#nullable enable
+using System;
 using System.Linq;
 using System.Collections.Generic;
 using System.Text;
@@ -10,6 +11,7 @@ using UnKnownKVMap = System.Collections.Generic.SortedDictionary<byte[], byte[]>
 using HDKeyPathKVMap = System.Collections.Generic.SortedDictionary<NBitcoin.PubKey, System.Tuple<NBitcoin.HDFingerprint, NBitcoin.KeyPath>>;
 using PartialSigKVMap = System.Collections.Generic.SortedDictionary<NBitcoin.KeyId, System.Tuple<NBitcoin.PubKey, NBitcoin.Crypto.ECDSASignature>>;
 using System.Collections;
+using NBitcoin.Protocol;
 
 namespace NBitcoin
 {
@@ -73,7 +75,7 @@ namespace NBitcoin
 						break;
 					case PSBTConstants.PSBT_OUT_WITNESSSCRIPT:
 						if (k.Length != 1)
-							throw new FormatException("Invalid PSBTOutput. Contains illegal value in key for witness script");
+							throw new FormatException("Invalid PSBTOutput. Unexpected key length for PSBT_OUT_BIP32_DERIVATION");
 						if (witness_script != null)
 							throw new FormatException("Invalid PSBTOutput, duplicate key for redeem_script");
 						witness_script = Script.FromBytesUnsafe(v);
@@ -85,6 +87,27 @@ namespace NBitcoin
 						KeyPath path = KeyPath.FromBytes(v.Skip(4).ToArray());
 						hd_keypaths.Add(pubkey2, new RootedKeyPath(new HDFingerprint(v.Take(4).ToArray()), path));
 						break;
+					case PSBTConstants.PSBT_OUT_TAP_BIP32_DERIVATION:
+						var pubkey3 = new TaprootPubKey(k.Skip(1).ToArray());
+						if (hd_taprootkeypaths.ContainsKey(pubkey3))
+							throw new FormatException("Invalid PSBTOutput, duplicate key for hd_taproot_keypaths");
+						var bs = new BitcoinStream(v);
+						List<uint256> hashes = null!;
+						bs.ReadWrite(ref hashes);
+						var pos = (int)bs.Inner.Position;
+						KeyPath path2 = KeyPath.FromBytes(v.Skip(pos + 4).ToArray());
+						hd_taprootkeypaths.Add(pubkey3,
+							new TaprootKeyPath(
+								new RootedKeyPath(new HDFingerprint(v.Skip(pos).Take(4).ToArray()), path2),
+								hashes.ToArray()));
+						break;
+					case PSBTConstants.PSBT_OUT_TAP_INTERNAL_KEY:
+						if (k.Length != 1)
+							throw new FormatException("Invalid PSBTOutput. Contains illegal value in key for internal taproot pubkey");
+						if (!TaprootInternalPubKey.TryCreate(v, out var tpk))
+							throw new FormatException("Invalid PSBTOutput. Contains invalid internal taproot pubkey");
+						TaprootInternalKey = tpk;
+						break;
 					default:
 						if (unknown.ContainsKey(k))
 							throw new FormatException("Invalid PSBTInput, duplicate key for unknown value");
@@ -94,8 +117,15 @@ namespace NBitcoin
 				stream.ReadWriteAsVarString(ref k);
 			}
 		}
-		internal void Combine(PSBTOutput other)
+
+		/// <summary>
+		/// Import informations contained by <paramref name="other"/> into this instance.
+		/// </summary>
+		/// <param name="other"></param>
+		public void UpdateFrom(PSBTOutput other)
 		{
+			if (other == null)
+				throw new ArgumentNullException(nameof(other));
 			if (redeem_script == null && other.redeem_script != null)
 				redeem_script = other.redeem_script;
 
@@ -129,6 +159,15 @@ namespace NBitcoin
 				stream.ReadWriteAsVarString(ref value);
 			}
 
+			if (this.TaprootInternalKey is TaprootInternalPubKey tp)
+			{
+				stream.ReadWriteAsVarInt(ref defaultKeyLen);
+				var key = PSBTConstants.PSBT_OUT_TAP_INTERNAL_KEY;
+				stream.ReadWrite(ref key);
+				var b = tp.ToBytes();
+				stream.ReadWriteAsVarString(ref b);
+			}
+
 			foreach (var pathPair in hd_keypaths)
 			{
 				var key = new byte[] { PSBTConstants.PSBT_OUT_BIP32_DERIVATION }.Concat(pathPair.Key.ToBytes());
@@ -136,6 +175,24 @@ namespace NBitcoin
 				var path = pathPair.Value.KeyPath.ToBytes();
 				var pathInfo = pathPair.Value.MasterFingerprint.ToBytes().Concat(path);
 				stream.ReadWriteAsVarString(ref pathInfo);
+			}
+			foreach (var pathPair in hd_taprootkeypaths)
+			{
+				var key = new byte[] { PSBTConstants.PSBT_OUT_TAP_BIP32_DERIVATION }.Concat(pathPair.Key.ToBytes());
+				stream.ReadWriteAsVarString(ref key);
+				uint leafCount = (uint)pathPair.Value.LeafHashes.Length;
+				BitcoinStream bs = new BitcoinStream(new MemoryStream(), true);
+				bs.ReadWriteAsVarInt(ref leafCount);
+				foreach (var hash in pathPair.Value.LeafHashes)
+				{
+					bs.ReadWrite(hash);
+				}
+				var b = pathPair.Value.RootedKeyPath.MasterFingerprint.ToBytes();
+				bs.ReadWrite(ref b);
+				b = pathPair.Value.RootedKeyPath.KeyPath.ToBytes();
+				bs.ReadWrite(ref b);
+				b = ((MemoryStream)bs.Inner).ToArrayEfficient();
+				stream.ReadWriteAsVarString(ref b);
 			}
 
 			foreach (var entry in unknown)
@@ -152,7 +209,7 @@ namespace NBitcoin
 
 		#endregion
 
-		public override bool Equals(object obj)
+		public override bool Equals(object? obj)
 		{
 			var item = obj as PSBTOutput;
 			if (item == null)
@@ -168,7 +225,7 @@ namespace NBitcoin
 		{
 			MemoryStream ms = new MemoryStream();
 			var bs = new BitcoinStream(ms, true);
-			bs.ConsensusFactory = Parent.tx.GetConsensusFactory();
+			bs.ConsensusFactory = Parent.GetConsensusFactory();
 			this.Serialize(bs);
 			return ms.ToArrayEfficient();
 		}
@@ -208,7 +265,10 @@ namespace NBitcoin
 				}
 				jsonWriter.WriteEndObject();
 			}
-
+			if (this.TaprootInternalKey is TaprootInternalPubKey tpk)
+			{
+				jsonWriter.WritePropertyValue("taproot_internal_key", tpk.ToString());
+			}
 			if (this.redeem_script != null)
 			{
 				jsonWriter.WritePropertyValue("redeem_script", redeem_script.ToString());
@@ -218,6 +278,7 @@ namespace NBitcoin
 				jsonWriter.WritePropertyValue("witness_script", witness_script.ToString());
 			}
 			jsonWriter.WriteBIP32Derivations(this.hd_keypaths);
+			jsonWriter.WriteBIP32Derivations(this.hd_taprootkeypaths);
 			jsonWriter.WriteEndObject();
 		}
 
@@ -236,7 +297,7 @@ namespace NBitcoin
 			return new Coin(OutPoint.Zero, TxOut);
 		}
 
-		protected override PSBTHDKeyMatch CreateHDKeyMatch(IHDKey accountKey, KeyPath addressKeyPath, KeyValuePair<PubKey, RootedKeyPath> kv)
+		protected override PSBTHDKeyMatch CreateHDKeyMatch(IHDKey accountKey, KeyPath addressKeyPath, KeyValuePair<IPubKey, RootedKeyPath> kv)
 		{
 			return new PSBTHDKeyMatch<PSBTOutput>(this, accountKey, addressKeyPath, kv);
 		}
@@ -251,3 +312,4 @@ namespace NBitcoin
 		}
 	}
 }
+#nullable disable
